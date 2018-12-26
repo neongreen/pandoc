@@ -1,8 +1,8 @@
 # This .travis.yml is modified from the sample at
 # https://docs.haskellstack.org/en/stable/GUIDE/#travis-with-caching
 
-# Use new container infrastructure to enable caching
-sudo: false
+# Allow sudo to enable 'mount'
+sudo: true
 
 # Do not choose a language; we provide our own build tools.
 language: generic
@@ -10,9 +10,7 @@ language: generic
 # Caching so the next build will be fast too.
 cache:
   directories:
-  - $HOME/.ghc
-  - $HOME/.cabal
-  - $HOME/.stack
+  - $HOME/drives
 
 # The different configurations we want to test. We have BUILD=cabal which uses
 # cabal-install, and BUILD=stack which uses Stack. More documentation on each
@@ -29,63 +27,46 @@ cache:
 # i.e. not waiting any of the allow_failure to finish
 matrix:
   include:
-  # We grab the appropriate GHC and cabal-install versions from hvr's PPA. See:
-  # https://github.com/hvr/multi-ghc-travis
-  - env: BUILD=cabal GHCVER=7.8.4 CABALVER=1.18
-    compiler: ": #GHC 7.8.4"
-    addons: {apt: {packages: [cabal-install-1.18,ghc-7.8.4,happy-1.19.5], sources: [hvr-ghc]}}
-
-  - env: BUILD=cabal GHCVER=7.10.3 CABALVER=1.22
-    compiler: ": #GHC 7.10.3"
-    addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3,happy-1.19.5], sources: [hvr-ghc]}}
-
-  - env: BUILD=cabal GHCVER=8.0.2 CABALVER=1.24
-    compiler: ": #GHC 8.0.2"
-    addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.2,happy-1.19.5], sources: [hvr-ghc]}}
-
-  - env: BUILD=cabal GHCVER=8.2.1 CABALVER=1.24
-    compiler: ": #GHC 8.2.1"
-    addons: {apt: {packages: [cabal-install-1.24,ghc-8.2.1,happy-1.19.5], sources: [hvr-ghc]}}
-
-  # Build with the newest GHC and cabal-install. This is an accepted failure,
-  # see below.
-  # - env: BUILD=cabal GHCVER=head  CABALVER=head
-  #   compiler: ": #GHC HEAD"
-  #   addons: {apt: {packages: [cabal-install-head,ghc-head], sources: [hvr-ghc]}}
-
-  # The Stack builds. We can pass in arbitrary Stack arguments via the ARGS
-  # variable, such as using --stack-yaml to point to a different file.
-  - env: BUILD=stack ARGS="--resolver lts-8"
-    compiler: ": #stack 8.0.2"
-    addons: {apt: {packages: [ghc-8.0.2], sources: [hvr-ghc]}}
-
-  # Nightly builds are allowed to fail
-  - env: BUILD=stack ARGS="--resolver nightly"
-    compiler: ": #stack nightly"
-    addons: {apt: {packages: [libgmp-dev]}}
-
-  # - env: BUILD=stack ARGS="--resolver lts-8"
-  #   compiler: ": #stack 8.0.2 osx"
-  #   os: osx
-
-  # - env: BUILD=stack ARGS="--resolver nightly"
-  #   compiler: ": #stack nightly osx"
-  #   os: osx
-
-  allow_failures:
-  - env: BUILD=cabal GHCVER=head  CABALVER=head
-  - env: BUILD=stack ARGS="--resolver nightly"
+  - env: BUILD=stack ARGS="--resolver lts-10" OPTS="-Wall -Wincomplete-record-updates -Wnoncanonical-monad-instances -Wnoncanonical-monadfail-instances -fno-warn-unused-do-bind -Werror"
+    compiler: ": #stack 8.2.2"
+    addons: {apt: {packages: [ghc-8.2.2], sources: [hvr-ghc]}}
 
   fast_finish: true
 
 before_install:
+# Create drives for ~/.stack and .stack-work, or unpack them if they exist
+# in cache (we need to pack with tar --sparse because otherwise the cache
+# would take 40GB)
+- mkdir -p $HOME/drives
+- pushd $HOME/drives
+- |
+  if [ -f stack.img.tar ]; then
+    tar -xvf stack.img.tar stack.img
+    rm stack.img.tar
+  else
+    truncate -s 20G stack.img
+    mkfs -F -t ext4 stack.img
+  fi
+- |
+  if [ -f stack-work.img.tar ]; then
+    tar -xvf stack-work.img.tar stack-work.img
+    rm stack-work.img.tar
+  else
+    truncate -s 20G stack-work.img
+    mkfs -F -t ext4 stack-work.img
+  fi
+- popd
+# Mount ~/.stack
+- rm -rf $HOME/.stack && mkdir $HOME/.stack
+- sudo mount $HOME/drives/stack.img $HOME/.stack
+- sudo chown -R $USER $HOME/.stack
+# Mount .stack-work
+- rm -rf .stack-work && mkdir .stack-work
+- sudo mount $HOME/drives/stack-work.img .stack-work
+- sudo chown -R $USER .stack-work
 # Using compiler above sets CC to an invalid value, so unset it
 - unset CC
-
-# We want to always allow newer versions of packages when building on GHC HEAD
-- CABALARGS=""
-- if [ "x$GHCVER" = "xhead" ]; then CABALARGS=--allow-newer; fi
-- export PATH=$PATH:/opt/happy/1.19.5/bin/:/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:$HOME/.local/bin:$HOME/.cabal/bin
+- export PATH=/opt/happy/1.19.5/bin/:/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:$HOME/.local/bin:$HOME/.cabal/bin:$PATH
 # Download and unpack the stack executable
 - |
   if [[ $BUILD == "stack" ]]; then
@@ -105,12 +86,13 @@ install:
   case "$BUILD" in
     stack)
       ulimit -n 4096
-      stack --no-terminal --install-ghc $ARGS test --flag 'aeson:fast' --only-dependencies --fast --flag pandoc:embed_data_files --test
+      stack config set system-ghc --global true
+      stack --no-terminal --install-ghc $ARGS build --only-dependencies --fast --flag 'pandoc:embed_data_files' --flag 'aeson:fast' --jobs 2
       ;;
     cabal)
       cabal --version
       travis_retry cabal update
-      cabal install -j --only-dependencies -ffast --enable-tests --enable-benchmarks -fembed_data_files --force-reinstalls --ghc-options=-O0 --reorder-goals --max-backjumps=-1 $CABALARGS
+      cabal install --disable-optimization --only-dependencies --flags="$FLAGS" --enable-tests --force-reinstalls --reorder-goals --max-backjumps=-1 $CABALARGS
       ;;
   esac
 
@@ -119,13 +101,25 @@ script:
   case "$BUILD" in
     stack)
       ulimit -n 4096
-      stack --no-terminal $ARGS test --flag 'aeson:fast' --flag pandoc:embed_data_files --haddock --no-haddock-deps --ghc-options="-O0 -Wall -fno-warn-unused-do-bind -Werror"
+      stack config set system-ghc --global true
+      stack --no-terminal $ARGS test --fast --flag 'aeson:fast' --flag pandoc:embed_data_files --haddock --no-haddock-deps --ghc-options="$OPTS"
       ;;
     cabal)
       cabal sdist --output-directory=sourcedist && \
       cd sourcedist && \
-      cabal configure --enable-tests --enable-benchmarks -v2 -fembed_data_files -ffast --ghc-options="-O0 -Wall -fno-warn-unused-do-bind -Werror" && \
-      cabal build && \
+      cabal configure --disable-optimization --enable-tests -v2 --flags="$FLAGS" --ghc-options="$OPTS" $CABALARGS && \
+      cabal build -v2 -j2 && \
       cabal test
       ;;
   esac
+
+before_cache:
+- sudo umount .stack-work
+- sudo umount $HOME/.stack
+- pushd $HOME/drives
+- echo "actual size taken by cached .img files (drives)"
+- ls -lahts *.img
+- tar -cSvf stack.img.tar stack.img
+- tar -cSvf stack-work.img.tar stack-work.img
+- rm *.img
+- popd

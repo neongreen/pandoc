@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.AsciiDoc
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -42,7 +42,8 @@ import Data.Aeson (Result (..), Value (String), fromJSON, toJSON)
 import Data.Char (isPunctuation, isSpace)
 import Data.List (intercalate, intersperse, stripPrefix)
 import qualified Data.Map as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Pandoc.Class (PandocMonad, report)
@@ -60,6 +61,7 @@ data WriterState = WriterState { defListMarker    :: String
                                , orderedListLevel :: Int
                                , bulletListLevel  :: Int
                                , intraword        :: Bool
+                               , autoIds          :: Set.Set String
                                }
 
 -- | Convert Pandoc to AsciiDoc.
@@ -70,6 +72,7 @@ writeAsciiDoc opts document =
     , orderedListLevel = 1
     , bulletListLevel = 1
     , intraword = False
+    , autoIds = Set.empty
     }
 
 type ADW = StateT WriterState
@@ -100,9 +103,8 @@ pandocToAsciiDoc opts (Pandoc meta blocks) = do
   let context  = defField "body" main
                $ defField "toc"
                   (writerTableOfContents opts &&
-                   writerTemplate opts /= Nothing)
-               $ defField "titleblock" titleblock
-               $ metadata'
+                   isJust (writerTemplate opts))
+               $defField "titleblock" titleblock metadata'
   case writerTemplate opts of
        Nothing  -> return main
        Just tpl -> renderTemplate' tpl context
@@ -137,7 +139,7 @@ blockToAsciiDoc _ Null = return empty
 blockToAsciiDoc opts (Plain inlines) = do
   contents <- inlineListToAsciiDoc opts inlines
   return $ contents <> blankline
-blockToAsciiDoc opts (Para [Image attr alt (src,'f':'i':'g':':':tit)]) = do
+blockToAsciiDoc opts (Para [Image attr alt (src,'f':'i':'g':':':tit)]) =
   blockToAsciiDoc opts (Para [Image attr alt (src,tit)])
 blockToAsciiDoc opts (Para inlines) = do
   contents <- inlineListToAsciiDoc opts inlines
@@ -165,9 +167,13 @@ blockToAsciiDoc opts (Header level (ident,_,_) inlines) = do
   let len = offset contents
   -- ident seem to be empty most of the time and asciidoc will generate them automatically
   -- so lets make them not show up when null
-  let identifier = if (null ident) then empty else ("[[" <> text ident <> "]]")
+  ids <- gets autoIds
+  let autoId = uniqueIdent inlines ids
+  modify $ \st -> st{ autoIds = Set.insert autoId ids }
+  let identifier = if null ident || (isEnabled Ext_auto_identifiers opts && ident == autoId)
+                     then empty else "[[" <> text ident <> "]]"
   let setext = writerSetextHeaders opts
-  return $
+  return
          (if setext
             then
               identifier $$ contents $$
@@ -179,7 +185,7 @@ blockToAsciiDoc opts (Header level (ident,_,_) inlines) = do
                _ -> empty) <> blankline
             else
               identifier $$ text (replicate level '=') <> space <> contents <> blankline)
-blockToAsciiDoc _ (CodeBlock (_,classes,_) str) = return $ (flush $
+blockToAsciiDoc _ (CodeBlock (_,classes,_) str) = return $ flush (
   if null classes
      then "...." $$ text str $$ "...."
      else attrs $$ "----" $$ text str $$ "----")
@@ -204,7 +210,7 @@ blockToAsciiDoc opts (Table caption aligns widths headers rows) =  do
   let isSimple = all (== 0) widths
   let relativePercentWidths = if isSimple
                                  then widths
-                                 else map (/ (sum widths)) widths
+                                 else map (/ sum widths) widths
   let widths'' :: [Integer]
       widths'' = map (floor . (* 100)) relativePercentWidths
   -- ensure that the widths sum to 100
@@ -220,7 +226,7 @@ blockToAsciiDoc opts (Table caption aligns widths headers rows) =  do
                          AlignCenter  -> "^"
                          AlignRight   -> ">"
                          AlignDefault -> "") ++
-                      if wi == 0 then "" else (show wi ++ "%")
+                      if wi == 0 then "" else show wi ++ "%"
   let headerspec = if all null headers
                       then empty
                       else text "options=\"header\","
@@ -266,14 +272,13 @@ blockToAsciiDoc opts (OrderedList (_start, sty, _delim) items) = do
   let markers' = map (\m -> if length m < 3
                                then m ++ replicate (3 - length m) ' '
                                else m) markers
-  contents <- mapM (\(item, num) -> orderedListItemToAsciiDoc opts item num) $
-              zip markers' items
+  contents <- zipWithM (orderedListItemToAsciiDoc opts) markers' items
   return $ cat contents <> blankline
 blockToAsciiDoc opts (DefinitionList items) = do
   contents <- mapM (definitionListItemToAsciiDoc opts) items
   return $ cat contents <> blankline
 blockToAsciiDoc opts (Div (ident,_,_) bs) = do
-  let identifier = if (null ident) then empty else ("[[" <> text ident <> "]]")
+  let identifier = if null ident then empty else ("[[" <> text ident <> "]]")
   contents <- blockListToAsciiDoc opts bs
   return $ identifier $$ contents
 
@@ -453,14 +458,14 @@ inlineToAsciiDoc opts (Link _ txt (src, _tit)) = do
               else prefix <> text src <> "[" <> linktext <> "]"
 inlineToAsciiDoc opts (Image attr alternate (src, tit)) = do
 -- image:images/logo.png[Company logo, title="blah"]
-  let txt = if (null alternate) || (alternate == [Str ""])
+  let txt = if null alternate || (alternate == [Str ""])
                then [Str "image"]
                else alternate
   linktext <- inlineListToAsciiDoc opts txt
   let linktitle = if null tit
                      then empty
                      else ",title=\"" <> text tit <> "\""
-      showDim dir = case (dimension dir attr) of
+      showDim dir = case dimension dir attr of
                       Just (Percent a) ->
                         ["scaledwidth=" <> text (show (Percent a))]
                       Just dim         ->
@@ -480,6 +485,6 @@ inlineToAsciiDoc opts (Note [Plain inlines]) = do
 -- asciidoc can't handle blank lines in notes
 inlineToAsciiDoc _ (Note _) = return "[multiblock footnote omitted]"
 inlineToAsciiDoc opts (Span (ident,_,_) ils) = do
-  let identifier = if (null ident) then empty else ("[[" <> text ident <> "]]")
+  let identifier = if null ident then empty else ("[[" <> text ident <> "]]")
   contents <- inlineListToAsciiDoc opts ils
   return $ identifier <> contents

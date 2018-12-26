@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2014-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+Copyright (C) 2014-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.Org.Shared
-   Copyright   : Copyright (C) 2014-2017 Albert Krewinkel
+   Copyright   : Copyright (C) 2014-2018 Albert Krewinkel
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -76,7 +76,7 @@ originalLang lang =
   let transLang = translateLang lang
   in if transLang == lang
      then []
-     else [("data-org-language", lang)]
+     else [("org-language", lang)]
 
 -- | Translate from Org-mode's programming language identifiers to those used
 -- by Pandoc.  This is useful to allow for proper syntax highlighting in

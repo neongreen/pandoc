@@ -2,7 +2,7 @@
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -45,13 +45,13 @@ module Text.Pandoc.Readers
   , readOdt
   , readMarkdown
   , readCommonMark
-  , readGFM
   , readMediaWiki
   , readVimwiki
   , readRST
   , readOrg
   , readLaTeX
   , readHtml
+  , readJATS
   , readTextile
   , readDocBook
   , readOPML
@@ -70,23 +70,24 @@ module Text.Pandoc.Readers
 
 import Control.Monad.Except (throwError)
 import Data.Aeson
+import qualified Data.ByteString.Lazy as BL
 import Data.List (intercalate)
+import Data.Text (Text)
 import Text.Pandoc.Class
 import Text.Pandoc.Definition
 import Text.Pandoc.Error
 import Text.Pandoc.Extensions
 import Text.Pandoc.Options
 import Text.Pandoc.Readers.CommonMark
-import Text.Pandoc.Readers.GFM
 import Text.Pandoc.Readers.DocBook
 import Text.Pandoc.Readers.Docx
 import Text.Pandoc.Readers.EPUB
 import Text.Pandoc.Readers.Haddock
-import Text.Pandoc.Readers.HTML
+import Text.Pandoc.Readers.HTML (readHtml)
+import Text.Pandoc.Readers.JATS (readJATS)
 import Text.Pandoc.Readers.LaTeX
 import Text.Pandoc.Readers.Markdown
 import Text.Pandoc.Readers.MediaWiki
-import Text.Pandoc.Readers.Vimwiki
 import Text.Pandoc.Readers.Muse
 import Text.Pandoc.Readers.Native
 import Text.Pandoc.Readers.Odt
@@ -94,14 +95,13 @@ import Text.Pandoc.Readers.OPML
 import Text.Pandoc.Readers.Org
 import Text.Pandoc.Readers.RST
 import Text.Pandoc.Readers.Textile
-import Text.Pandoc.Readers.TWiki
 import Text.Pandoc.Readers.TikiWiki
+import Text.Pandoc.Readers.TWiki
 import Text.Pandoc.Readers.Txt2Tags
+import Text.Pandoc.Readers.Vimwiki
 import Text.Pandoc.Shared (mapLeft)
-import Text.Parsec.Error
 import qualified Text.Pandoc.UTF8 as UTF8
-import qualified Data.ByteString.Lazy as BL
-import Data.Text (Text)
+import Text.Parsec.Error
 
 data Reader m = TextReader (ReaderOptions -> Text -> m Pandoc)
               | ByteStringReader (ReaderOptions -> BL.ByteString -> m Pandoc)
@@ -119,7 +119,6 @@ readers = [ ("native"       , TextReader readNative)
            ,("markdown_github" , TextReader readMarkdown)
            ,("markdown_mmd",  TextReader readMarkdown)
            ,("commonmark"   , TextReader readCommonMark)
-           ,("gfm"          , TextReader readGFM)
            ,("rst"          , TextReader readRST)
            ,("mediawiki"    , TextReader readMediaWiki)
            ,("vimwiki"      , TextReader readVimwiki)
@@ -128,6 +127,7 @@ readers = [ ("native"       , TextReader readNative)
            ,("org"          , TextReader readOrg)
            ,("textile"      , TextReader readTextile) -- TODO : textile+lhs
            ,("html"         , TextReader readHtml)
+           ,("jats"         , TextReader readJATS)
            ,("latex"        , TextReader readLaTeX)
            ,("haddock"      , TextReader readHaddock)
            ,("twiki"        , TextReader readTWiki)

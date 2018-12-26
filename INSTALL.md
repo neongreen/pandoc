@@ -3,41 +3,32 @@
 ## Windows
 
   - There is a package installer at pandoc's [download page].
+    This will install pandoc, replacing older versions, and
+    update your path to include the directory where pandoc's
+    binaries are installed.
+
+  - If you prefer not to use the msi installer, we also provide
+    a zip file that contains pandoc's binaries and
+    documentation.  Simply unzip this file and move the binaries
+    to a directory of your choice.
 
   - For PDF output, you'll also need to install LaTeX.
     We recommend [MiKTeX](http://miktex.org/).
 
-  - If you'd prefer, you can extract the pandoc and pandoc-citeproc
-    executables from the MSI and copy them directly to any directory,
-    without running the installer.  Here is an example showing how to
-    extract the executables from the pandoc-1.19.1 installer and copy
-    them to `C:\Utils\Console\`:
+## macOS
 
-        mkdir "%TEMP%\pandoc\"
-        start /wait msiexec.exe /a pandoc-1.19.1-windows.msi /qn targetdir="%TEMP%\pandoc\"
-        copy /y "%TEMP%\pandoc\pandoc.exe" C:\Utils\Console\
-        copy /y "%TEMP%\pandoc\pandoc-citeproc.exe" C:\Utils\Console\
-        rmdir /s /q "%TEMP%\pandoc\"
-
-## MacOS
+  - You can install pandoc using
+    [homebrew](http://brew.sh): `brew install pandoc`.
 
   - There is a package installer at pandoc's [download page].
     If you later want to uninstall the package, you can do so
     by downloading [this script][uninstaller]
     and running it with `perl uninstall-pandoc.pl`.
 
-  - It is possible to extract the pandoc and pandoc-citeproc
-    executables from the MacOS pkg file, if you'd rather not run
-    the installer.  To do this (for the version 1.19.1 package):
-
-        mkdir pandoc-extract
-        cd pandoc-extract
-        xar -x ../pandoc-1.19.1-osx.pkg
-        cat pandoc.pkg/Payload | gunzip -dc | cpio -i
-        # executables are now in ./usr/bin/, man pages in ./usr/share/man
-
-  - You can also install pandoc using
-    [homebrew](http://brew.sh): `brew install pandoc`.
+  - We also provide a zip file containing the binaries and man
+    pages, for those who prefer not to use the installer.  Simply
+    unzip the file and move the binaries and man pages to
+    whatever directory you like.
 
   - For PDF output, you'll also need LaTeX.  Because a full [MacTeX]
     installation takes more than a gigabyte of disk space, we recommend
@@ -55,30 +46,37 @@
     Note, however, that versions in the repositories are often
     old.
 
-  - For 64-bit [Debian] and [Ubuntu], we provide a debian package
-    on the [download page].
+  - We provide a binary package for amd64 architecture on
+    the [download page].  This provides both `pandoc` and
+    `pandoc-citeproc`. The executables are statically linked and
+    have no dynamic dependencies or dependencies on external
+    data files.  Note:  because of the static
+    linking, the pandoc binary from this package cannot use lua
+    filters that require external lua modules written in C.
+
+    Both a tarball and a deb installer are provided.  To install the deb:
 
         sudo dpkg -i $DEB
 
-    where `$DEB` is the path to the downloaded deb, will
-    install the `pandoc` and `pandoc-citeproc` executables
-    and man pages.
+    where `$DEB` is the path to the downloaded deb.  This will
+    install the `pandoc` and `pandoc-citeproc` executables and
+    man pages.
 
-  - If you use an RPM-based distro, you may be
-    able to install this deb using `alien`, or try
+    If you use an RPM-based distro, you may be able to install
+    the deb from our download page using `alien`.
 
-        ar p $DEB data.tar.gz | sudo tar xvz --strip-components 2 -C /usr/local
+    On any distro, you may install from the tarball into `$DEST`
+    (say, `/usr/local/` or `$HOME/.local`) by doing
 
-  - If you'd rather install pandoc in your home directory, say
-    in `$HOME/.local`, then you can extract the files manually
-    from the deb:
+        tar xvzf $TGZ --strip-components 1 -C $DEST
 
-        ar p $DEB data.tar.gz | tar xvz --strip-components 2 -C $HOME/.local/
+    where `$TGZ` is the path to the downloaded zipped tarball.
+    For Pandoc versions before 2.0, which don't provide
+    a tarball, try instead
 
-    where, again, `$DEB` is the path to the downloaded deb.
+        ar p $DEB data.tar.gz | tar xvz --strip-components 2 -C $DEST
 
-  - If the version in your repository is too old and you cannot
-    use the deb we provide, you can install from source, using the
+  - You can also install from source, using the
     instructions below under [Compiling from source].
     Note that most distros have the Haskell platform in their
     package repositories.  For example, on Debian/Ubuntu,
@@ -122,7 +120,7 @@ the last released version.
 
 The easiest way to build pandoc from source is to use [stack]:
 
-1.  Install [stack].
+1.  Install [stack]. Note that Pandoc requires stack >= 1.6.0.
 
 2.  Change to the pandoc source directory and issue the following commands:
 
@@ -139,7 +137,7 @@ The easiest way to build pandoc from source is to use [stack]:
 
 1.  Install the [Haskell platform].  This will give you [GHC] and
     the [cabal-install] build tool.  Note that pandoc requires
-    GHC >= 7.8.
+    GHC >= 7.10.
 
 2.  Update your package database:
 
@@ -180,7 +178,7 @@ The easiest way to build pandoc from source is to use [stack]:
 
     Note that this requires the `text-icu` library, which in turn
     depends on the C library `icu4c`.  Installation directions
-    vary by platform.  Here is how it might work on MacOS with homebrew:
+    vary by platform.  Here is how it might work on macOS with homebrew:
 
         brew install icu4c
         cabal install --extra-lib-dirs=/usr/local/Cellar/icu4c/51.1/lib \
@@ -311,33 +309,10 @@ To run just the markdown benchmarks:
 
     cabal bench --benchmark-options='markdown'
 
-### Building the whole pandoc ecosystem
-
-Sometimes pandoc's development code depends on unreleased versions
-of dependent libraries.  You'll need to build these as well.  A
-maximal build method would be
-
-    mkdir pandoc-build
-    cd pandoc-build
-    git clone https://github.com/jgm/pandoc-types
-    git clone https://github.com/jgm/texmath
-    git clone https://github.com/jgm/pandoc-citeproc
-    git clone https://github.com/jgm/pandoc
-    git clone https://github.com/jgm/cmark-hs
-    git clone https://github.com/jgm/zip-archive
-    cd pandoc
-    stack install --test --install-ghc --stack-yaml stack.full.yaml
-
-To pull in the latest changes, after you've done this and there have been
-changes in the repositories:  Visit each repository in pandoc-build
-(pandoc-types, texmath, pandoc-citeproc, pandoc, zip-archive, cmark-hs) and do
-`git pull`.  In the pandoc repo, also do `stack install --test
---stack-yaml stack.full.yaml`.
-
 
 [Arch]: https://www.archlinux.org/packages/community/x86_64/pandoc/
 [Cabal User's Guide]: http://www.haskell.org/cabal/release/latest/doc/users-guide/builders.html#setup-configure-paths
-[Debian]: http://packages.debian.org/lenny/pandoc
+[Debian]: https://packages.debian.org/pandoc
 [Fedora]: https://apps.fedoraproject.org/packages/pandoc
 [FreeBSD ports]: http://www.freshports.org/textproc/pandoc/
 [GHC]:  http://www.haskell.org/ghc/
@@ -346,9 +321,9 @@ changes in the repositories:  Visit each repository in pandoc-build
 [MacPorts]: http://trac.macports.org/browser/trunk/dports/textproc/pandoc/Portfile
 [MacTeX]: https://tug.org/mactex/
 [NetBSD]: http://pkgsrc.se/wip/pandoc
-[NixOS]: http://nixos.org/nixos/
-[Slackware]: http://www.linuxpackages.net/search_view.php?by=name&name=pandoc&ver=
-[Ubuntu]: http://www.ubuntu.com
+[NixOS]: https://nixos.org/nixos/packages.html
+[Slackware]: https://www.slackbuilds.org/result/?search=pandoc&sv=
+[Ubuntu]: https://packages.ubuntu.com/pandoc
 [download page]: https://github.com/jgm/pandoc/releases/latest
 [gentoo]: http://packages.gentoo.org/package/app-text/pandoc
 [haskell repository]: https://wiki.archlinux.org/index.php/Haskell_Package_Guidelines#.5Bhaskell.5D

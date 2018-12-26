@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2007-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2007-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Ms
-   Copyright   : Copyright (C) 2007-2017 John MacFarlane
+   Copyright   : Copyright (C) 2007-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -36,29 +36,29 @@ TODO:
 -}
 
 module Text.Pandoc.Writers.Ms ( writeMs ) where
-import Text.Pandoc.Definition
-import Text.Pandoc.Templates
-import Text.Pandoc.Shared
-import Text.Pandoc.Writers.Shared
-import Text.Pandoc.Options
-import Text.Pandoc.Writers.Math
-import Text.Printf ( printf )
-import qualified Data.Text as T
-import Data.Text (Text)
+import Control.Monad.State.Strict
+import Data.Char (isLower, isUpper, toUpper)
+import Data.List (intercalate, intersperse, sort)
 import qualified Data.Map as Map
-import Data.Maybe ( catMaybes, fromMaybe )
-import Data.List ( intersperse, intercalate, sort )
-import Text.Pandoc.Pretty
+import Data.Maybe (catMaybes, fromMaybe)
+import Data.Text (Text)
+import qualified Data.Text as T
+import Network.URI (escapeURIString, isAllowedInURI)
+import Skylighting
+import System.FilePath (takeExtension)
 import Text.Pandoc.Class (PandocMonad, report)
+import Text.Pandoc.Definition
+import Text.Pandoc.Highlighting
 import Text.Pandoc.ImageSize
 import Text.Pandoc.Logging
-import Control.Monad.State.Strict
-import Data.Char ( isLower, isUpper, toUpper )
+import Text.Pandoc.Options
+import Text.Pandoc.Pretty
+import Text.Pandoc.Shared
+import Text.Pandoc.Templates
+import Text.Pandoc.Writers.Math
+import Text.Pandoc.Writers.Shared
+import Text.Printf (printf)
 import Text.TeXMath (writeEqn)
-import System.FilePath (takeExtension)
-import Skylighting
-import Text.Pandoc.Highlighting
-import Network.URI (escapeURIString, isAllowedInURI)
 
 data WriterState = WriterState { stHasInlineMath :: Bool
                                , stFirstPara     :: Bool
@@ -121,15 +121,14 @@ pandocToMs opts (Pandoc meta blocks) = do
               $ defField "toc" (writerTableOfContents opts)
               $ defField "title-meta" titleMeta
               $ defField "author-meta" (intercalate "; " authorsMeta)
-              $ defField "highlighting-macros" highlightingMacros
-              $ metadata
+              $ defField "highlighting-macros" highlightingMacros metadata
   case writerTemplate opts of
        Nothing  -> return main
        Just tpl -> renderTemplate' tpl context
 
 -- | Association list of characters to escape.
 msEscapes :: Map.Map Char String
-msEscapes = Map.fromList $
+msEscapes = Map.fromList
               [ ('\160', "\\~")
               , ('\'', "\\[aq]")
               , ('`', "\\`")
@@ -146,9 +145,7 @@ msEscapes = Map.fromList $
               ]
 
 escapeChar :: Char -> String
-escapeChar c = case Map.lookup c msEscapes of
-                    Just s -> s
-                    Nothing -> [c]
+escapeChar c = fromMaybe [c] (Map.lookup c msEscapes)
 
 -- | Escape | character, used to mark inline math, inside math.
 escapeBar :: String -> String
@@ -175,14 +172,14 @@ toSmallCaps (c:cs)
 
 -- | Escape a literal (code) section for Ms.
 escapeCode :: String -> String
-escapeCode = concat . intersperse "\n" . map escapeLine . lines
-  where escapeCodeChar ' ' = "\\ "
+escapeCode = intercalate "\n" . map escapeLine . lines
+  where escapeCodeChar ' '  = "\\ "
         escapeCodeChar '\t' = "\\\t"
-        escapeCodeChar c = escapeChar c
+        escapeCodeChar c    = escapeChar c
         escapeLine codeline =
           case concatMap escapeCodeChar codeline of
             a@('.':_) -> "\\&" ++ a
-            b       -> b
+            b         -> b
 
 -- We split inline lists into sentences, and print one sentence per
 -- line.  groff/troff treats the line-ending period differently.
@@ -194,8 +191,8 @@ breakSentence [] = ([],[])
 breakSentence xs =
   let isSentenceEndInline (Str ys@(_:_)) | last ys == '.' = True
       isSentenceEndInline (Str ys@(_:_)) | last ys == '?' = True
-      isSentenceEndInline (LineBreak) = True
-      isSentenceEndInline _         = False
+      isSentenceEndInline LineBreak      = True
+      isSentenceEndInline _              = False
       (as, bs) = break isSentenceEndInline xs
   in  case bs of
            []             -> (as, [])
@@ -283,11 +280,11 @@ blockToMs opts (Header level (ident,classes,_) inlines) = do
                      level <= writerTOCDepth opts
                     then text ".XS"
                          $$ backlink <> doubleQuotes (
-                            nowrap ((text (replicate level '\t') <>
+                            nowrap (text (replicate level '\t') <>
                              (if null secnum
                                  then empty
                                  else text secnum <> text "\\~\\~")
-                              <> contents)))
+                              <> contents))
                          $$ text ".XE"
                     else empty
   modify $ \st -> st{ stFirstPara = True }
@@ -325,12 +322,12 @@ blockToMs opts (Table caption alignments widths headers rows) =
                    then repeat ""
                    else map (printf "w(%0.1fn)" . (70 *)) widths
   -- 78n default width - 8n indent = 70n
-  let coldescriptions = text $ intercalate " "
+  let coldescriptions = text $ unwords
                         (zipWith (\align width -> aligncode align ++ width)
                         alignments iwidths) ++ "."
   colheadings <- mapM (blockListToMs opts) headers
   let makeRow cols = text "T{" $$
-                     (vcat $ intersperse (text "T}\tT{") cols) $$
+                     vcat (intersperse (text "T}\tT{") cols) $$
                      text "T}"
   let colheadings' = if all null headers
                         then empty
@@ -349,7 +346,8 @@ blockToMs opts (BulletList items) = do
   return (vcat contents)
 blockToMs opts (OrderedList attribs items) = do
   let markers = take (length items) $ orderedListMarkers attribs
-  let indent = 2 + (maximum $ map length markers)
+  let indent = 2 +
+                     maximum (map length markers)
   contents <- mapM (\(num, item) -> orderedListItemToMs opts num indent item) $
               zip markers items
   setFirstPara
@@ -362,9 +360,9 @@ blockToMs opts (DefinitionList items) = do
 -- | Convert bullet list item (list of blocks) to ms.
 bulletListItemToMs :: PandocMonad m => WriterOptions -> [Block] -> MS m Doc
 bulletListItemToMs _ [] = return empty
-bulletListItemToMs opts ((Para first):rest) =
-  bulletListItemToMs opts ((Plain first):rest)
-bulletListItemToMs opts ((Plain first):rest) = do
+bulletListItemToMs opts (Para first:rest) =
+  bulletListItemToMs opts (Plain first:rest)
+bulletListItemToMs opts (Plain first:rest) = do
   first' <- blockToMs opts (Plain first)
   rest' <- blockListToMs opts rest
   let first'' = text ".IP \\[bu] 3" $$ first'
@@ -385,8 +383,8 @@ orderedListItemToMs :: PandocMonad m
                     -> [Block]  -- ^ list item (list of blocks)
                     -> MS m Doc
 orderedListItemToMs _ _ _ [] = return empty
-orderedListItemToMs opts num indent ((Para first):rest) =
-  orderedListItemToMs opts num indent ((Plain first):rest)
+orderedListItemToMs opts num indent (Para first:rest) =
+  orderedListItemToMs opts num indent (Plain first:rest)
 orderedListItemToMs opts num indent (first:rest) = do
   first' <- blockToMs opts first
   rest' <- blockListToMs opts rest
@@ -409,9 +407,9 @@ definitionListItemToMs opts (label, defs) = do
                  then return empty
                  else liftM vcat $ forM defs $ \blocks -> do
                         let (first, rest) = case blocks of
-                              ((Para x):y) -> (Plain x,y)
-                              (x:y)        -> (x,y)
-                              []           -> (Plain [], [])
+                              (Para x:y) -> (Plain x,y)
+                              (x:y)      -> (x,y)
+                              []         -> (Plain [], [])
                                                -- should not happen
                         rest' <- liftM vcat $
                                   mapM (\item -> blockToMs opts item) rest
@@ -503,7 +501,7 @@ inlineToMs _ il@(RawInline f str)
   | otherwise        = do
     report $ InlineNotRendered il
     return empty
-inlineToMs _ (LineBreak) = return $ cr <> text ".br" <> cr
+inlineToMs _ LineBreak = return $ cr <> text ".br" <> cr
 inlineToMs opts SoftBreak =
   handleNotes opts $
     case writerWrapText opts of
@@ -539,8 +537,7 @@ handleNotes opts fallback = do
      then return fallback
      else do
        modify $ \st -> st{ stNotes = [] }
-       res <- vcat <$> mapM (handleNote opts) notes
-       return res
+       vcat <$> mapM (handleNote opts) notes
 
 handleNote :: PandocMonad m => WriterOptions -> Note -> MS m Doc
 handleNote opts bs = do
@@ -548,7 +545,7 @@ handleNote opts bs = do
   -- line after the note ref:
   let bs' = case bs of
                  (Para ils : rest) -> Plain ils : rest
-                 _ -> bs
+                 _                 -> bs
   contents <- blockListToMs opts bs'
   return $ cr <> text ".FS" $$ contents $$ text ".FE" <> cr
 
@@ -589,7 +586,7 @@ styleToMs sty = vcat $ colordefs ++ map (toMacro sty) alltoktypes
         allcolors = catMaybes $ ordNub $
           [defaultColor sty, backgroundColor sty,
            lineNumberColor sty, lineNumberBackgroundColor sty] ++
-           concatMap colorsForToken (map snd (tokenStyles sty))
+           concatMap (colorsForToken. snd) (Map.toList (tokenStyles sty))
         colorsForToken ts = [tokenColor ts, tokenBackground ts]
 
 hexColor :: Color -> String
@@ -614,7 +611,7 @@ toMacro sty toktype =
         resetfont = if tokBold || tokItalic
                        then text "\\\\f[C]"
                        else empty
-        tokSty = lookup toktype (tokenStyles sty)
+        tokSty = Map.lookup toktype (tokenStyles sty)
         tokCol = (tokSty >>= tokenColor) `mplus` defaultColor sty
         -- tokBg  = (tokSty >>= tokenBackground) `mplus` backgroundColor sty
         tokBold = fromMaybe False (tokenBold <$> tokSty)

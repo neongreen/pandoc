@@ -20,7 +20,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 -}
 {- |
    Module      : Text.Pandoc.Logging
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -45,8 +45,9 @@ import Data.Aeson.Encode.Pretty (Config (..), defConfig, encodePretty',
                                  keyOrder)
 import qualified Data.ByteString.Lazy as BL
 import Data.Data (Data, toConstr)
-import Data.Generics (Typeable)
+import Data.List (isSuffixOf)
 import qualified Data.Text as Text
+import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import Text.Pandoc.Definition
 import Text.Parsec.Pos
@@ -75,6 +76,7 @@ data LogMessage =
   | DuplicateIdentifier String SourcePos
   | ReferenceNotFound String SourcePos
   | CircularReference String SourcePos
+  | UndefinedToggle String SourcePos
   | ParsingUnescaped String SourcePos
   | CouldNotLoadIncludeFile String SourcePos
   | MacroAlreadyDefined String SourcePos
@@ -94,6 +96,9 @@ data LogMessage =
   | InvalidLang String
   | CouldNotHighlight String
   | MissingCharacter String
+  | Deprecated String String
+  | NoTranslation String
+  | CouldNotLoadTranslations String String
   deriving (Show, Eq, Data, Ord, Typeable, Generic)
 
 instance ToJSON LogMessage where
@@ -137,6 +142,11 @@ instance ToJSON LogMessage where
             "line" .= toJSON (sourceLine pos),
             "column" .= toJSON (sourceColumn pos)]
       CircularReference s pos ->
+           ["contents" .= Text.pack s,
+            "source" .= Text.pack (sourceName pos),
+            "line" .= toJSON (sourceLine pos),
+            "column" .= toJSON (sourceColumn pos)]
+      UndefinedToggle s pos ->
            ["contents" .= Text.pack s,
             "source" .= Text.pack (sourceName pos),
             "line" .= toJSON (sourceLine pos),
@@ -191,6 +201,15 @@ instance ToJSON LogMessage where
            ["message" .= Text.pack msg]
       MissingCharacter msg ->
            ["message" .= Text.pack msg]
+      Deprecated thing msg ->
+           ["thing" .= Text.pack thing,
+            "message" .= Text.pack msg]
+      NoTranslation term ->
+           ["term" .= Text.pack term]
+      CouldNotLoadTranslations lang msg ->
+           ["lang" .= Text.pack lang,
+            "message" .= Text.pack msg]
+
 
 showPos :: SourcePos -> String
 showPos pos = sn ++ "line " ++
@@ -212,7 +231,7 @@ showLogMessage msg =
          "Skipped '" ++ s ++ "' at " ++ showPos pos
        CouldNotParseYamlMetadata s pos ->
          "Could not parse YAML metadata at " ++ showPos pos ++
-           if null s then "" else (": " ++ s)
+           if null s then "" else ": " ++ s
        DuplicateLinkReference s pos ->
          "Duplicate link reference '" ++ s ++ "' at " ++ showPos pos
        DuplicateNoteReference s pos ->
@@ -226,6 +245,8 @@ showLogMessage msg =
          "Reference not found for '" ++ s ++ "' at " ++ showPos pos
        CircularReference s pos ->
          "Circular reference '" ++ s ++ "' at " ++ showPos pos
+       UndefinedToggle s pos ->
+         "Undefined toggle '" ++ s ++ "' at " ++ showPos pos
        ParsingUnescaped s pos ->
          "Parsing unescaped '" ++ s ++ "' at " ++ showPos pos
        CouldNotLoadIncludeFile fp pos ->
@@ -240,20 +261,20 @@ showLogMessage msg =
          "Docx parser warning: " ++ s
        CouldNotFetchResource fp s ->
          "Could not fetch resource '" ++ fp ++ "'" ++
-           if null s then "" else (": " ++ s)
+           if null s then "" else ": " ++ s
        CouldNotDetermineImageSize fp s ->
          "Could not determine image size for '" ++ fp ++ "'" ++
-           if null s then "" else (": " ++ s)
+           if null s then "" else ": " ++ s
        CouldNotConvertImage fp s ->
          "Could not convert image '" ++ fp ++ "'" ++
-           if null s then "" else (": " ++ s)
+           if null s then "" else ": " ++ s
        CouldNotDetermineMimeType fp ->
          "Could not determine mime type for '" ++ fp ++ "'"
        CouldNotConvertTeXMath s m ->
          "Could not convert TeX math '" ++ s ++ "', rendering as TeX" ++
-           if null m then "" else (':':'\n':m)
+           if null m then "" else ':' : '\n' : m
        CouldNotParseCSS m ->
-         "Could not parse CSS" ++ if null m then "" else (':':'\n':m)
+         "Could not parse CSS" ++ if null m then "" else ':' : '\n' : m
        Fetching fp ->
          "Fetching " ++ fp ++ "..."
        Extracting fp ->
@@ -272,11 +293,21 @@ showLogMessage msg =
          "Could not highlight code block:\n" ++ m
        MissingCharacter m ->
          "Missing character: " ++ m
+       Deprecated t m ->
+         "Deprecated: " ++ t ++
+         if null m
+            then ""
+            else ". " ++ m
+       NoTranslation t ->
+         "The term " ++ t ++ " has no translation defined."
+       CouldNotLoadTranslations lang m ->
+         "Could not load translations for " ++ lang ++
+           if null m then "" else '\n' : m
 
 messageVerbosity:: LogMessage -> Verbosity
 messageVerbosity msg =
   case msg of
-       SkippedContent{}             -> WARNING
+       SkippedContent{}             -> INFO
        CouldNotParseYamlMetadata{}  -> WARNING
        DuplicateLinkReference{}     -> WARNING
        DuplicateNoteReference{}     -> WARNING
@@ -284,12 +315,15 @@ messageVerbosity msg =
        DuplicateIdentifier{}        -> WARNING
        ReferenceNotFound{}          -> WARNING
        CircularReference{}          -> WARNING
-       CouldNotLoadIncludeFile{}    -> WARNING
+       UndefinedToggle{}            -> WARNING
+       CouldNotLoadIncludeFile f _
+        | ".sty" `isSuffixOf` f     -> INFO
+        | otherwise                 -> WARNING
        MacroAlreadyDefined{}        -> WARNING
        ParsingUnescaped{}           -> INFO
        InlineNotRendered{}          -> INFO
        BlockNotRendered{}           -> INFO
-       DocxParserWarning{}          -> WARNING
+       DocxParserWarning{}          -> INFO
        CouldNotFetchResource{}      -> WARNING
        CouldNotDetermineImageSize{} -> WARNING
        CouldNotConvertImage{}       -> WARNING
@@ -303,3 +337,6 @@ messageVerbosity msg =
        InvalidLang{}                -> WARNING
        CouldNotHighlight{}          -> WARNING
        MissingCharacter{}           -> WARNING
+       Deprecated{}                 -> WARNING
+       NoTranslation{}              -> WARNING
+       CouldNotLoadTranslations{}   -> WARNING

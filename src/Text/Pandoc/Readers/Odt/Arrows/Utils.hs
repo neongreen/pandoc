@@ -39,11 +39,11 @@ with an equivalent return value.
 -- We export everything
 module Text.Pandoc.Readers.Odt.Arrows.Utils where
 
-import           Control.Arrow
-import           Control.Monad                         ( join )
+import Control.Arrow
+import Control.Monad (join)
 
-import           Text.Pandoc.Readers.Odt.Generic.Fallible
-import           Text.Pandoc.Readers.Odt.Generic.Utils
+import Text.Pandoc.Readers.Odt.Generic.Fallible
+import Text.Pandoc.Readers.Odt.Generic.Utils
 
 and2 :: (Arrow a) => a b c -> a b c' -> a b (c,c')
 and2 = (&&&)
@@ -211,9 +211,9 @@ a ^>>?% f = arr a >>?^ (uncurry f)
 ---
 (>>?%?) :: (ArrowChoice a)
            => FallibleArrow a x f (b,b')
-           -> (b -> b' -> (Either f c))
+           -> (b -> b' -> Either f c)
            -> FallibleArrow a x f c
-a >>?%? f = a >>?^? (uncurry f)
+a >>?%? f = a >>?^? uncurry f
 
 infixr 1  >>?,  >>?^,  >>?^?
 infixr 1 ^>>?, >>?!

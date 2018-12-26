@@ -2,14 +2,28 @@ clone_folder: "c:\\pandoc"
 environment:
   global:
     WIXBIN: "c:\\Program Files (x86)\\WiX Toolset v3.11\\bin"
-    STACK_YAML: "c:\\pandoc\\stack.pkg.yaml"
+    STACK_YAML: "c:\\pandoc\\stack.yaml"
+    STACK_BUILD_OPTS: "-j1 --no-terminal --test --local-bin-path=.\\windows"
+    # see #4201, https://github.com/haskell-tools/haskell-tools/issues/277
   matrix:
   - STACK_VERSION: "windows-i386"
     STACK_ROOT: "c:\\sr32"
     STACK: "%STACK_ROOT%\\stack.exe"
+    STACK_FLAGS: "--flag=hslua:lua_32bits"
 #  - STACK_VERSION: "windows-x86_64"
 #    STACK_ROOT: "c:\\sr64"
 #    STACK: "%STACK_ROOT%\\stack.exe"
+#    STACK_FLAGS: ""
+
+skip_commits:
+  files:
+    - '*.md'
+    - '*.txt'
+    - '.travis.yml'
+    - 'Makefile'
+    - 'man/pandoc.1'
+    - 'linux/*'
+    - 'macos/*'
 
 matrix:
   fast_finish: true
@@ -23,10 +37,7 @@ cache:
 
 # Note: to reset build cache, do the following in JavaScript
 # console on appveyor:
-# $.ajax({
-#    url: 'https://ci.appveyor.com/api/projects/jgm/pandoc/buildcache',
-#    type: 'DELETE'})
-
+# $.ajax({ url: 'https://ci.appveyor.com/api/projects/jgm/pandoc/buildcache', type: 'DELETE'})
 # We don't do a normal C build, but build in test_script via stack
 build: off
 
@@ -44,7 +55,7 @@ test_script:
       %STACK% setup > nul
       %STACK% path
       echo "" | %STACK% clean
-      echo "" | %STACK% -j1 --no-terminal --test --local-bin-path=.\windows install pandoc pandoc-citeproc
+      echo "" | %STACK% install %STACK_BUILD_OPTS% pandoc pandoc-citeproc %STACK_FLAGS%
 
 after_test:
     # .\ in the stack commandline seems to be .\windows\ (where the stack-appveyor.yaml is)

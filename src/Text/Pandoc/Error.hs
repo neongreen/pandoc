@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric      #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 -}
 {- |
    Module      : Text.Pandoc.Error
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -35,14 +35,14 @@ module Text.Pandoc.Error (
   handleError) where
 
 import Control.Exception (Exception)
-import Data.Generics (Typeable)
+import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
+import Network.HTTP.Client (HttpException)
+import System.Exit (ExitCode (..), exitWith)
+import System.IO (stderr)
+import qualified Text.Pandoc.UTF8 as UTF8
 import Text.Parsec.Error
 import Text.Parsec.Pos hiding (Line)
-import qualified Text.Pandoc.UTF8 as UTF8
-import System.Exit (exitWith, ExitCode(..))
-import System.IO (stderr)
-import Network.HTTP.Client (HttpException)
 
 type Input = String
 
@@ -90,13 +90,18 @@ handleError (Left e) =
                                         ,"\n", replicate (errColumn - 1) ' '
                                         ,"^"]
                         else ""
-        in  err 65 $ "\nError at " ++ show  err' ++ errorInFile
+        in  err 65 $ "\nError at " ++ show  err' ++
+                     -- if error comes from a chunk or included file,
+                     -- then we won't get the right text this way:
+                     if sourceName errPos == "source"
+                        then errorInFile
+                        else ""
     PandocMakePDFError s -> err 65 s
     PandocOptionError s -> err 2 s
     PandocSyntaxMapError s -> err 67 s
     PandocFailOnWarningError -> err 3 "Failing because there were warnings."
     PandocPDFProgramNotFoundError pdfprog -> err 47 $
-        pdfprog ++ " not found. " ++ pdfprog ++ " is needed for pdf output."
+        pdfprog ++ " not found. Please select a different --pdf-engine or install " ++ pdfprog
     PandocPDFError logmsg -> err 43 $ "Error producing PDF.\n" ++ logmsg
     PandocFilterError filtername msg -> err 83 $ "Error running filter " ++
         filtername ++ ":\n" ++ msg

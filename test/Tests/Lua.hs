@@ -1,19 +1,24 @@
-{-# Language OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Tests.Lua ( tests ) where
 
 import Control.Monad (when)
+import Data.Version (Version (versionBranch))
 import System.FilePath ((</>))
 import Test.Tasty (TestTree, localOption)
 import Test.Tasty.HUnit (Assertion, assertEqual, testCase)
-import Test.Tasty.QuickCheck (ioProperty, testProperty, QuickCheckTests(..))
+import Test.Tasty.QuickCheck (QuickCheckTests (..), ioProperty, testProperty)
 import Text.Pandoc.Arbitrary ()
-import Text.Pandoc.Definition (Block, Inline, Meta, Pandoc)
-import Text.Pandoc.Builder ( (<>), bulletList, doc, doubleQuoted, emph
-                           , linebreak, rawBlock, singleQuoted, para, plain
-                           , space, str, strong)
-import Text.Pandoc.Lua
+import Text.Pandoc.Builder (bulletList, divWith, doc, doubleQuoted, emph,
+                            header, linebreak, para, plain, rawBlock,
+                            singleQuoted, space, str, strong, (<>))
+import Text.Pandoc.Class (runIOorExplode, setUserDataDir)
+import Text.Pandoc.Definition (Block (BlockQuote, Div, Para), Inline (Emph, Str),
+                               Attr, Meta, Pandoc, pandocTypesVersion)
+import Text.Pandoc.Lua (runLuaFilter, runPandocLua)
+import Text.Pandoc.Options (def)
+import Text.Pandoc.Shared (pandocVersion)
 
-import qualified Scripting.Lua as Lua
+import qualified Foreign.Lua as Lua
 
 tests :: [TestTree]
 tests = map (localOption (QuickCheckTests 20))
@@ -64,30 +69,128 @@ tests = map (localOption (QuickCheckTests 20))
       "single-to-double-quoted.lua"
       (doc . para . singleQuoted $ str "simple")
       (doc . para . doubleQuoted $ str "simple")
+
+  , testCase "Count inlines via metatable catch-all" $
+    assertFilterConversion "filtering with metatable catch-all failed"
+      "metatable-catch-all.lua"
+      (doc . para $ "four words, three spaces")
+      (doc . para $ str "7")
+
+  , testCase "Count blocks via Block-specific catch-all" $
+    assertFilterConversion "filtering with Block catch-all failed"
+      "block-count.lua"
+      (doc $ para "one" <> para "two")
+      (doc $ para "2")
+
+  , testCase "Convert header upper case" $
+    assertFilterConversion "converting header to upper case failed"
+      "uppercase-header.lua"
+      (doc $ header 1 "les états-unis" <> para "text")
+      (doc $ header 1 "LES ÉTATS-UNIS" <> para "text")
+
+  , testCase "Attribute lists are convenient to use" $
+    let kv_before = [("one", "1"), ("two", "2"), ("three", "3")]
+        kv_after  = [("one", "eins"), ("three", "3"), ("five", "5")]
+    in assertFilterConversion "Attr doesn't behave as expected"
+      "attr-test.lua"
+      (doc $ divWith ("", [], kv_before) (para "nil"))
+      (doc $ divWith ("", [], kv_after) (para "nil"))
+
+  , testCase "Test module pandoc.utils" $
+    assertFilterConversion "pandoc.utils doesn't work as expected."
+      "test-pandoc-utils.lua"
+      (doc $ para "doesn't matter")
+      (doc $ mconcat [ plain (str "hierarchicalize: OK")
+                     , plain (str "normalize_date: OK")
+                     , plain (str "pipe: OK")
+                     , plain (str "failing pipe: OK")
+                     , plain (str "read: OK")
+                     , plain (str "failing read: OK")
+                     , plain (str "sha1: OK")
+                     , plain (str "stringify: OK")
+                     , plain (str "to_roman_numeral: OK")
+                     ])
+
+  , testCase "Script filename is set" $
+    assertFilterConversion "unexpected script name"
+      "script-name.lua"
+      (doc $ para "ignored")
+      (doc $ para (str $ "lua" </> "script-name.lua"))
+
+  , testCase "Pandoc version is set" . runPandocLua' $ do
+      Lua.getglobal' "table.concat"
+      Lua.getglobal "PANDOC_VERSION"
+      Lua.push ("." :: String) -- seperator
+      Lua.call 2 1
+      Lua.liftIO . assertEqual "pandoc version is wrong" pandocVersion
+        =<< Lua.peek Lua.stackTop
+
+  , testCase "Pandoc types version is set" . runPandocLua' $ do
+      let versionNums = versionBranch pandocTypesVersion
+      Lua.getglobal "PANDOC_API_VERSION"
+      Lua.liftIO . assertEqual "pandoc-types version is wrong" versionNums
+        =<< Lua.peek Lua.stackTop
+
+  , testCase "Allow singleton inline in constructors" . runPandocLua' $ do
+      Lua.liftIO . assertEqual "Not the exptected Emph" (Emph [Str "test"])
+        =<< Lua.callFunc "pandoc.Emph" (Str "test")
+      Lua.liftIO . assertEqual "Unexpected element" (Para [Str "test"])
+        =<< Lua.callFunc "pandoc.Para" ("test" :: String)
+      Lua.liftIO . assertEqual "Unexptected element"
+        (BlockQuote [Para [Str "foo"]]) =<< (
+        do
+          Lua.getglobal' "pandoc.BlockQuote"
+          Lua.push (Para [Str "foo"])
+          _ <- Lua.call 1 1
+          Lua.peek Lua.stackTop
+        )
+
+  , testCase "Elements with Attr have `attr` accessor" . runPandocLua' $ do
+      Lua.push (Div ("hi", ["moin"], [])
+                [Para [Str "ignored"]])
+      Lua.getfield Lua.stackTop "attr"
+      Lua.liftIO . assertEqual "no accessor" (("hi", ["moin"], []) :: Attr)
+        =<< Lua.peek Lua.stackTop
+
+  , testCase "informative error messages" . runPandocLua' $ do
+      Lua.pushboolean True
+      err <- Lua.peekEither Lua.stackTop :: Lua.Lua (Either String Pandoc)
+      case err of
+        Left msg -> do
+          let expectedMsg = "Could not get Pandoc value: "
+                            ++ "expected table but got boolean."
+          Lua.liftIO $ assertEqual "unexpected error message" expectedMsg msg
+        Right _ -> error "Getting a Pandoc element from a bool should fail."
   ]
 
 assertFilterConversion :: String -> FilePath -> Pandoc -> Pandoc -> Assertion
 assertFilterConversion msg filterPath docIn docExpected = do
-  docRes <- runLuaFilter Nothing ("lua" </> filterPath) [] docIn
-  assertEqual msg docExpected docRes
+  docEither <- runIOorExplode $ do
+    setUserDataDir (Just "../data")
+    runLuaFilter def ("lua" </> filterPath) [] docIn
+  case docEither of
+    Left _       -> fail "lua filter failed"
+    Right docRes -> assertEqual msg docExpected docRes
 
-roundtripEqual :: (Eq a, Lua.StackValue a) => a -> IO Bool
+roundtripEqual :: (Eq a, Lua.FromLuaStack a, Lua.ToLuaStack a) => a -> IO Bool
 roundtripEqual x = (x ==) <$> roundtripped
  where
-  roundtripped :: (Lua.StackValue a) => IO a
-  roundtripped = do
-    lua <- Lua.newstate
-    Lua.openlibs lua
-    pushPandocModule Nothing lua
-    Lua.setglobal lua "pandoc"
-    oldSize <- Lua.gettop lua
-    Lua.push lua x
-    size <- Lua.gettop lua
-    when ((size - oldSize) /= 1) $
+  roundtripped :: (Lua.FromLuaStack a, Lua.ToLuaStack a) => IO a
+  roundtripped = runPandocLua' $ do
+    oldSize <- Lua.gettop
+    Lua.push x
+    size <- Lua.gettop
+    when (size - oldSize /= 1) $
       error ("not exactly one additional element on the stack: " ++ show size)
-    res <- Lua.peek lua (-1)
-    retval <- case res of
-                Nothing -> error "could not read from stack"
-                Just y  -> return y
-    Lua.close lua
-    return retval
+    res <- Lua.peekEither (-1)
+    case res of
+      Left e -> error (show e)
+      Right y -> return y
+
+runPandocLua' :: Lua.Lua a -> IO a
+runPandocLua' op = runIOorExplode $ do
+  setUserDataDir (Just "../data")
+  res <- runPandocLua op
+  case res of
+    Left e -> error (show e)
+    Right x -> return x

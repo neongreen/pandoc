@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
 Copyright (C) 2010-2015 Puneeth Chaganti <punchagan@gmail.com>
-              2010-2017 John MacFarlane <jgm@berkeley.edu>
-              2016-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+              2010-2018 John MacFarlane <jgm@berkeley.edu>
+              2016-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,8 +22,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 {- |
    Module      : Text.Pandoc.Writers.Org
   Copyright    : © 2010-2015 Puneeth Chaganti <punchagan@gmail.com>
-                   2010-2017 John MacFarlane <jgm@berkeley.edu>
-                   2016-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+                   2010-2018 John MacFarlane <jgm@berkeley.edu>
+                   2016-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -37,14 +37,14 @@ Org-Mode:  <http://orgmode.org>
 module Text.Pandoc.Writers.Org (writeOrg) where
 import Control.Monad.State.Strict
 import Data.Char (isAlphaNum, toLower)
-import Data.Text (Text)
 import Data.List (intersect, intersperse, isPrefixOf, partition, transpose)
+import Data.Text (Text)
 import Text.Pandoc.Class (PandocMonad, report)
 import Text.Pandoc.Definition
+import Text.Pandoc.Logging
 import Text.Pandoc.Options
 import Text.Pandoc.Pretty
 import Text.Pandoc.Shared
-import Text.Pandoc.Logging
 import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.Writers.Shared
 
@@ -129,36 +129,25 @@ blockToOrg (Div (_,classes@(cls:_),kvs) bs) | "drawer" `elem` classes = do
            blankline $$ contents $$
            blankline $$ drawerEndTag $$
            blankline
-blockToOrg (Div attrs bs) = do
+blockToOrg (Div (ident, classes, kv) bs) = do
   contents <- blockListToOrg bs
+  -- if one class looks like the name of a greater block then output as such:
+  -- The ID, if present, is added via the #+NAME keyword; other classes and
+  -- key-value pairs are kept as #+ATTR_HTML attributes.
   let isGreaterBlockClass = (`elem` ["center", "quote"]) . map toLower
-  return $ case attrs of
-    ("", [], []) ->
-      -- nullAttr, treat contents as if it wasn't wrapped
-      blankline $$ contents $$ blankline
-    (ident, [], []) ->
-      -- only an id: add id as an anchor, unwrap the rest
-      blankline $$ "<<" <> text ident <> ">>" $$ contents $$ blankline
-    (ident, classes, kv) ->
-      -- if one class looks like the name of a greater block then output as
-      -- such: The ID, if present, is added via the #+NAME keyword; other
-      -- classes and key-value pairs are kept as #+ATTR_HTML attributes.
-      let
-        (blockTypeCand, classes') = partition isGreaterBlockClass classes
-      in case blockTypeCand of
-        (blockType:classes'') ->
-          blankline $$ attrHtml (ident, classes'' <> classes', kv) $$
-          "#+BEGIN_" <> text blockType $$ contents $$
-          "#+END_" <> text blockType $$ blankline
-        _                     ->
-          -- fallback: wrap in div tags
-          let
-            startTag = tagWithAttrs "div" attrs
-            endTag = text "</div>"
-          in blankline $$ "#+BEGIN_HTML" $$
-             nest 2 startTag $$ "#+END_HTML" $$ blankline $$
-             contents $$ blankline $$ "#+BEGIN_HTML" $$
-             nest 2 endTag $$ "#+END_HTML" $$ blankline
+      (blockTypeCand, classes') = partition isGreaterBlockClass classes
+  return $ case blockTypeCand of
+    (blockType:classes'') ->
+      blankline $$ attrHtml (ident, classes'' <> classes', kv) $$
+      "#+BEGIN_" <> text blockType $$ contents $$
+      "#+END_" <> text blockType $$ blankline
+    _                     ->
+      -- fallback with id: add id as an anchor if present, discard classes and
+      -- key-value pairs, unwrap the content.
+      let contents' = if not (null ident)
+                      then "<<" <> text ident <> ">>" $$ contents
+                      else contents
+      in blankline $$ contents' $$ blankline
 blockToOrg (Plain inlines) = inlineListToOrg inlines
 -- title beginning with fig: indicates that the image is a figure
 blockToOrg (Para [Image attr txt (src,'f':'i':'g':':':tit)]) = do
@@ -173,7 +162,7 @@ blockToOrg (Para inlines) = do
 blockToOrg (LineBlock lns) = do
   let splitStanza [] = []
       splitStanza xs = case break (== mempty) xs of
-        (l, [])  -> l : []
+        (l, [])  -> [l]
         (l, _:r) -> l : splitStanza r
   let joinWithLinefeeds  = nowrap . mconcat . intersperse cr
   let joinWithBlankLines = mconcat . intersperse blankline
@@ -213,7 +202,7 @@ blockToOrg (Table caption' _ _ headers rows) =  do
   caption'' <- inlineListToOrg caption'
   let caption = if null caption'
                    then empty
-                   else ("#+CAPTION: " <> caption'')
+                   else "#+CAPTION: " <> caption''
   headers' <- mapM blockListToOrg headers
   rawRows <- mapM (mapM blockListToOrg) rows
   let numChars = maximum . map offset
@@ -289,8 +278,8 @@ propertiesDrawer (ident, classes, kv) =
   let
     drawerStart = text ":PROPERTIES:"
     drawerEnd   = text ":END:"
-    kv'  = if (classes == mempty) then kv  else ("CLASS", unwords classes):kv
-    kv'' = if (ident == mempty)   then kv' else ("CUSTOM_ID", ident):kv'
+    kv'  = if classes == mempty then kv  else ("CLASS", unwords classes):kv
+    kv'' = if ident == mempty   then kv' else ("CUSTOM_ID", ident):kv'
     properties = vcat $ map kvToOrgProperty kv''
   in
     drawerStart <> cr <> properties <> cr <> drawerEnd
@@ -303,7 +292,7 @@ attrHtml :: Attr -> Doc
 attrHtml (""   , []     , []) = mempty
 attrHtml (ident, classes, kvs) =
   let
-    name = if (null ident) then mempty else "#+NAME: " <> text ident <> cr
+    name = if null ident then mempty else "#+NAME: " <> text ident <> cr
     keyword = "#+ATTR_HTML"
     classKv = ("class", unwords classes)
     kvStrings = map (\(k,v) -> ":" <> k <> " " <> v) (classKv:kvs)
@@ -319,7 +308,18 @@ blockListToOrg blocks = vcat <$> mapM blockToOrg blocks
 inlineListToOrg :: PandocMonad m
                 => [Inline]
                 -> Org m Doc
-inlineListToOrg lst = hcat <$> mapM inlineToOrg lst
+inlineListToOrg lst = hcat <$> mapM inlineToOrg (fixMarkers lst)
+  where fixMarkers [] = []  -- prevent note refs and list markers from wrapping, see #4171
+        fixMarkers (Space : x : rest) | shouldFix x =
+          Str " " : x : fixMarkers rest
+        fixMarkers (SoftBreak : x : rest) | shouldFix x =
+          Str " " : x : fixMarkers rest
+        fixMarkers (x : rest) = x : fixMarkers rest
+
+        shouldFix Note{} = True -- Prevent footnotes
+        shouldFix (Str "-") = True -- Prevent bullet list items
+        -- TODO: prevent ordered list items
+        shouldFix _ = False
 
 -- | Convert Pandoc inline element to Org.
 inlineToOrg :: PandocMonad m => Inline -> Org m Doc
@@ -370,19 +370,19 @@ inlineToOrg SoftBreak = do
        WrapPreserve -> return cr
        WrapAuto     -> return space
        WrapNone     -> return space
-inlineToOrg (Link _ txt (src, _)) = do
+inlineToOrg (Link _ txt (src, _)) =
   case txt of
         [Str x] | escapeURI x == src ->  -- autolink
-             do return $ "[[" <> text (orgPath x) <> "]]"
+             return $ "[[" <> text (orgPath x) <> "]]"
         _ -> do contents <- inlineListToOrg txt
                 return $ "[[" <> text (orgPath src) <> "][" <> contents <> "]]"
-inlineToOrg (Image _ _ (source, _)) = do
+inlineToOrg (Image _ _ (source, _)) =
   return $ "[[" <> text (orgPath source) <> "]]"
 inlineToOrg (Note contents) = do
   -- add to notes in state
   notes <- gets stNotes
   modify $ \st -> st { stNotes = contents:notes }
-  let ref = show $ (length notes) + 1
+  let ref = show $ length notes + 1
   return $ "[fn:" <> text ref <> "]"
 
 orgPath :: String -> String

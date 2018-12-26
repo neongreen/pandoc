@@ -1,7 +1,7 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-
-Copyright (C) 2007-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2007-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.ConTeXt
-   Copyright   : Copyright (C) 2007-2017 John MacFarlane
+   Copyright   : Copyright (C) 2007-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -31,16 +31,16 @@ Conversion of 'Pandoc' format into ConTeXt.
 -}
 module Text.Pandoc.Writers.ConTeXt ( writeConTeXt ) where
 import Control.Monad.State.Strict
-import Data.Char (ord)
+import Data.Char (ord, isDigit)
 import Data.List (intercalate, intersperse)
-import Data.Maybe (catMaybes)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Network.URI (unEscapeString)
 import Text.Pandoc.BCP47
-import Text.Pandoc.Class (PandocMonad, report)
-import Text.Pandoc.Logging
+import Text.Pandoc.Class (PandocMonad, report, toLang)
 import Text.Pandoc.Definition
 import Text.Pandoc.ImageSize
+import Text.Pandoc.Logging
 import Text.Pandoc.Options
 import Text.Pandoc.Pretty
 import Text.Pandoc.Shared
@@ -54,6 +54,8 @@ data WriterState =
               , stOrderedListLevel :: Int  -- level of ordered list
               , stOptions          :: WriterOptions -- writer options
               }
+
+data Tabl = Xtb | Ntb deriving (Show, Eq)
 
 orderedListStyles :: [Char]
 orderedListStyles = cycle "narg"
@@ -82,8 +84,7 @@ pandocToConTeXt options (Pandoc meta blocks) = do
               meta
   body <- mapM (elementToConTeXt options) $ hierarchicalize blocks
   let main = (render' . vcat) body
-  let layoutFromMargins = intercalate [','] $ catMaybes $
-                              map (\(x,y) ->
+  let layoutFromMargins = intercalate [','] $ mapMaybe (\(x,y) ->
                                 ((x ++ "=") ++) <$> getField y metadata)
                               [("leftmargin","margin-left")
                               ,("rightmargin","margin-right")
@@ -105,10 +106,10 @@ pandocToConTeXt options (Pandoc meta blocks) = do
                 $ defField "number-sections" (writerNumberSections options)
                 $ maybe id (defField "context-lang") mblang
                 $ (case getField "papersize" metadata of
-                        Just ("a4" :: String) -> resetField "papersize"
-                                                    ("A4" :: String)
-                        _                     -> id)
-                $ metadata
+                        Just (('a':d:ds) :: String)
+                          | all isDigit (d:ds) -> resetField "papersize"
+                                                     (('A':d:ds) :: String)
+                        _                     -> id) metadata
   let context' = defField "context-dir" (toContextDir
                                          $ getField "dir" context) context
   case writerTemplate options of
@@ -150,7 +151,7 @@ stringToConTeXt opts = concatMap (escapeCharForConTeXt opts)
 toLabel :: String -> String
 toLabel z = concatMap go z
  where go x
-         | elem x ("\\#[]\",{}%()|=" :: String) = "ux" ++ printf "%x" (ord x)
+         | x `elem` ("\\#[]\",{}%()|=" :: String) = "ux" ++ printf "%x" (ord x)
          | otherwise = [x]
 
 -- | Convert Elements to ConTeXt
@@ -158,8 +159,9 @@ elementToConTeXt :: PandocMonad m => WriterOptions -> Element -> WM m Doc
 elementToConTeXt _ (Blk block) = blockToConTeXt block
 elementToConTeXt opts (Sec level _ attr title' elements) = do
   header' <- sectionHeader attr level title'
+  footer' <- sectionFooter attr level
   innerContents <- mapM (elementToConTeXt opts) elements
-  return $ vcat (header' : innerContents)
+  return $ header' $$ vcat innerContents $$ footer'
 
 -- | Convert Pandoc block element to ConTeXt.
 blockToConTeXt :: PandocMonad m => Block -> WM m Doc
@@ -206,7 +208,7 @@ blockToConTeXt (Div (ident,_,kvs) bs) = do
                                      <> text lng <> "]" $$ txt $$ "\\stop"
                        Nothing  -> txt
       wrapBlank txt = blankline <> txt <> blankline
-  fmap (wrapBlank . wrapLang . wrapDir . wrapRef) $ blockListToConTeXt bs
+  (wrapBlank . wrapLang . wrapDir . wrapRef) <$> blockListToConTeXt bs
 blockToConTeXt (BulletList lst) = do
   contents <- mapM listItemToConTeXt lst
   return $ ("\\startitemize" <> if isTightList lst
@@ -253,37 +255,81 @@ blockToConTeXt HorizontalRule = return $ "\\thinrule" <> blankline
 -- If this is ever executed, provide a default for the reference identifier.
 blockToConTeXt (Header level attr lst) = sectionHeader attr level lst
 blockToConTeXt (Table caption aligns widths heads rows) = do
-    let colDescriptor colWidth alignment = (case alignment of
-                                               AlignLeft    -> 'l'
-                                               AlignRight   -> 'r'
-                                               AlignCenter  -> 'c'
-                                               AlignDefault -> 'l'):
-           if colWidth == 0
-              then "|"
-              else ("p(" ++ printf "%.2f" colWidth ++ "\\textwidth)|")
-    let colDescriptors = "|" ++ (concat $
-                                 zipWith colDescriptor widths aligns)
-    headers <- if all null heads
-                  then return empty
-                  else liftM ($$ "\\HL") $ tableRowToConTeXt heads
+    opts <- gets stOptions
+    let tabl = if isEnabled Ext_ntb opts
+          then Ntb
+          else Xtb
     captionText <- inlineListToConTeXt caption
-    rows' <- mapM tableRowToConTeXt rows
-    return $ "\\placetable" <> (if null caption
-                                   then brackets "none"
-                                   else empty)
-                            <> braces captionText $$
-             "\\starttable" <> brackets (text colDescriptors) $$
-             "\\HL" $$ headers $$
-             vcat rows' $$ "\\HL" $$ "\\stoptable" <> blankline
+    headers <- if all null heads
+               then return empty
+               else tableRowToConTeXt tabl aligns widths heads
+    rows' <- mapM (tableRowToConTeXt tabl aligns widths) rows
+    body <- tableToConTeXt tabl headers rows'
+    return $ "\\startplacetable" <> brackets (
+      if null caption
+        then "location=none"
+        else "title=" <> braces captionText
+      ) $$ body $$ "\\stopplacetable" <> blankline
 
-tableRowToConTeXt :: PandocMonad m => [[Block]] -> WM m Doc
-tableRowToConTeXt cols = do
-  cols' <- mapM blockListToConTeXt cols
-  return $ (vcat (map ("\\NC " <>) cols')) $$ "\\NC\\AR"
+tableToConTeXt :: PandocMonad m => Tabl -> Doc -> [Doc] -> WM m Doc
+tableToConTeXt Xtb heads rows =
+  return $ "\\startxtable" $$
+    (if isEmpty heads
+      then empty
+      else "\\startxtablehead[head]" $$ heads $$ "\\stopxtablehead") $$
+    (if null rows
+      then empty
+      else "\\startxtablebody[body]" $$ vcat (init rows) $$ "\\stopxtablebody" $$
+           "\\startxtablefoot[foot]" $$ last rows $$ "\\stopxtablefoot") $$
+    "\\stopxtable"
+tableToConTeXt Ntb heads rows =
+  return $ "\\startTABLE" $$
+    (if isEmpty heads
+      then empty
+      else "\\startTABLEhead" $$ heads $$ "\\stopTABLEhead") $$
+    (if null rows
+      then empty
+      else "\\startTABLEbody" $$ vcat (init rows) $$ "\\stopTABLEbody" $$
+           "\\startTABLEfoot" $$ last rows $$ "\\stopTABLEfoot") $$
+    "\\stopTABLE"
+
+tableRowToConTeXt :: PandocMonad m => Tabl -> [Alignment] -> [Double] -> [[Block]] -> WM m Doc
+tableRowToConTeXt Xtb aligns widths cols = do
+  cells <- mapM (tableColToConTeXt Xtb) $ zip3 aligns widths cols
+  return $ "\\startxrow" $$ vcat cells $$ "\\stopxrow"
+tableRowToConTeXt Ntb aligns widths cols = do
+  cells <- mapM (tableColToConTeXt Ntb) $ zip3 aligns widths cols
+  return $ vcat cells $$ "\\NC\\NR"
+
+tableColToConTeXt :: PandocMonad m => Tabl -> (Alignment, Double, [Block]) -> WM m Doc
+tableColToConTeXt tabl (align, width, blocks) = do
+  cellContents <- blockListToConTeXt blocks
+  let colwidth = if width == 0
+        then empty
+        else "width=" <> braces (text (printf "%.2f\\textwidth" width))
+  let halign = alignToConTeXt align
+  let options = (if keys == empty
+                 then empty
+                 else brackets keys) <> space
+        where keys = hcat $ intersperse "," $ filter (empty /=) [halign, colwidth]
+  tableCellToConTeXt tabl options cellContents
+
+tableCellToConTeXt :: PandocMonad m => Tabl -> Doc -> Doc -> WM m Doc
+tableCellToConTeXt Xtb options cellContents =
+  return $ "\\startxcell" <> options <> cellContents <> " \\stopxcell"
+tableCellToConTeXt Ntb options cellContents =
+  return $ "\\NC" <> options <> cellContents
+
+alignToConTeXt :: Alignment -> Doc
+alignToConTeXt align = case align of
+                         AlignLeft    -> "align=right"
+                         AlignRight   -> "align=left"
+                         AlignCenter  -> "align=middle"
+                         AlignDefault -> empty
 
 listItemToConTeXt :: PandocMonad m => [Block] -> WM m Doc
 listItemToConTeXt list = blockListToConTeXt list >>=
-  return . ("\\item" $$) . (nest 2)
+  return . ("\\item" $$) . nest 2
 
 defListItemToConTeXt :: PandocMonad m => ([Inline], [[Block]]) -> WM m Doc
 defListItemToConTeXt (term, defs) = do
@@ -358,7 +404,7 @@ inlineToConTeXt (RawInline "tex" str) = return $ text str
 inlineToConTeXt il@(RawInline _ _) = do
   report $ InlineNotRendered il
   return empty
-inlineToConTeXt (LineBreak) = return $ text "\\crlf" <> cr
+inlineToConTeXt LineBreak = return $ text "\\crlf" <> cr
 inlineToConTeXt SoftBreak = do
   wrapText <- gets (writerWrapText . stOptions)
   return $ case wrapText of
@@ -367,7 +413,7 @@ inlineToConTeXt SoftBreak = do
                WrapPreserve -> cr
 inlineToConTeXt Space = return space
 -- Handle HTML-like internal document references to sections
-inlineToConTeXt (Link _ txt (('#' : ref), _)) = do
+inlineToConTeXt (Link _ txt ('#' : ref, _)) = do
   opts <- gets stOptions
   contents <-  inlineListToConTeXt txt
   let ref' = toLabel $ stringToConTeXt opts ref
@@ -393,7 +439,7 @@ inlineToConTeXt (Link _ txt (src, _)) = do
 inlineToConTeXt (Image attr@(_,cls,_) _ (src, _)) = do
   opts <- gets stOptions
   let showDim dir = let d = text (show dir) <> "="
-                    in case (dimension dir attr) of
+                    in case dimension dir attr of
                          Just (Pixel a)   ->
                            [d <> text (showInInch opts (Pixel a)) <> "in"]
                          Just (Percent a) ->
@@ -432,7 +478,7 @@ inlineToConTeXt (Span (_,_,kvs) ils) = do
                        Just lng -> "\\start\\language[" <> text lng
                                       <> "]" <> txt <> "\\stop "
                        Nothing -> txt
-  fmap (wrapLang . wrapDir) $ inlineListToConTeXt ils
+  (wrapLang . wrapDir) <$> inlineListToConTeXt ils
 
 -- | Craft the section header, inserting the section reference, if supplied.
 sectionHeader :: PandocMonad m
@@ -440,31 +486,51 @@ sectionHeader :: PandocMonad m
               -> Int
               -> [Inline]
               -> WM m Doc
-sectionHeader (ident,classes,_) hdrLevel lst = do
+sectionHeader (ident,classes,kvs) hdrLevel lst = do
+  opts <- gets stOptions
   contents <- inlineListToConTeXt lst
-  st <- get
-  let opts = stOptions st
+  levelText <- sectionLevelToText opts (ident,classes,kvs) hdrLevel
+  let ident' = if null ident
+               then empty
+               else "reference=" <> braces (text (toLabel ident))
+  let contents' = if contents == empty
+                  then empty
+                  else "title=" <> braces contents
+  let options = if keys == empty || levelText == empty
+                then empty
+                else brackets keys
+        where keys = hcat $ intersperse "," $ filter (empty /=) [contents', ident']
+  let starter = if writerSectionDivs opts
+                then "\\start"
+                else "\\"
+  return $ starter <> levelText <> options <> blankline
+
+-- | Craft the section footer
+sectionFooter :: PandocMonad m => Attr -> Int -> WM m Doc
+sectionFooter attr hdrLevel = do
+  opts <- gets stOptions
+  levelText <- sectionLevelToText opts attr hdrLevel
+  return $ if writerSectionDivs opts
+           then "\\stop" <> levelText <> blankline
+           else empty
+
+-- | Generate a textual representation of the section level
+sectionLevelToText :: PandocMonad m => WriterOptions -> Attr -> Int -> WM m Doc
+sectionLevelToText opts (_,classes,_) hdrLevel = do
   let level' = case writerTopLevelDivision opts of
                  TopLevelPart    -> hdrLevel - 2
                  TopLevelChapter -> hdrLevel - 1
                  TopLevelSection -> hdrLevel
                  TopLevelDefault -> hdrLevel
-  let ident' = toLabel ident
   let (section, chapter) = if "unnumbered" `elem` classes
                               then (text "subject", text "title")
                               else (text "section", text "chapter")
   return $ case level' of
-             -1                   -> text "\\part" <> braces contents
-             0                    -> char '\\' <> chapter <> braces contents
-             n | n >= 1 && n <= 5 -> char '\\'
-                                     <> text (concat (replicate (n - 1) "sub"))
-                                     <> section
-                                     <> (if (not . null) ident'
-                                         then brackets (text ident')
-                                         else empty)
-                                     <> braces contents
-                                     <> blankline
-             _                    -> contents <> blankline
+             -1         -> text "part"
+             0          -> chapter
+             n | n >= 1 -> text (concat (replicate (n - 1) "sub"))
+                           <> section
+             _          -> empty -- cannot happen
 
 fromBCP47 :: PandocMonad m => Maybe String -> WM m (Maybe String)
 fromBCP47 mbs = fromBCP47' <$> toLang mbs
@@ -474,26 +540,26 @@ fromBCP47 mbs = fromBCP47' <$> toLang mbs
 -- https://tools.ietf.org/html/bcp47#section-2.1
 -- http://wiki.contextgarden.net/Language_Codes
 fromBCP47' :: Maybe Lang -> Maybe String
-fromBCP47' (Just (Lang "ar" _ "SY" _)     )  = Just "ar-sy"
-fromBCP47' (Just (Lang "ar" _ "IQ" _)     )  = Just "ar-iq"
-fromBCP47' (Just (Lang "ar" _ "JO" _)     )  = Just "ar-jo"
-fromBCP47' (Just (Lang "ar" _ "LB" _)     )  = Just "ar-lb"
-fromBCP47' (Just (Lang "ar" _ "DZ" _)     )  = Just "ar-dz"
-fromBCP47' (Just (Lang "ar" _ "MA" _)     )  = Just "ar-ma"
-fromBCP47' (Just (Lang "de" _ _ ["1901"]) )  = Just "deo"
-fromBCP47' (Just (Lang "de" _ "DE" _)     )  = Just "de-de"
-fromBCP47' (Just (Lang "de" _ "AT" _)     )  = Just "de-at"
-fromBCP47' (Just (Lang "de" _ "CH" _)     )  = Just "de-ch"
-fromBCP47' (Just (Lang "el" _ _ ["poly"]) )  = Just "agr"
-fromBCP47' (Just (Lang "en" _ "US" _)     )  = Just "en-us"
-fromBCP47' (Just (Lang "en" _ "GB" _)     )  = Just "en-gb"
-fromBCP47' (Just (Lang "grc"_  _ _)       )  = Just "agr"
-fromBCP47' (Just (Lang "el" _ _ _)        )  = Just "gr"
-fromBCP47' (Just (Lang "eu" _ _ _)        )  = Just "ba"
-fromBCP47' (Just (Lang "he" _ _ _)        )  = Just "il"
-fromBCP47' (Just (Lang "jp" _ _ _)        )  = Just "ja"
-fromBCP47' (Just (Lang "uk" _ _ _)        )  = Just "ua"
-fromBCP47' (Just (Lang "vi" _ _ _)        )  = Just "vn"
-fromBCP47' (Just (Lang "zh" _ _ _)        )  = Just "cn"
-fromBCP47' (Just (Lang l _ _ _)           )  = Just l
-fromBCP47' Nothing                           = Nothing
+fromBCP47' (Just (Lang "ar" _ "SY" _)     ) = Just "ar-sy"
+fromBCP47' (Just (Lang "ar" _ "IQ" _)     ) = Just "ar-iq"
+fromBCP47' (Just (Lang "ar" _ "JO" _)     ) = Just "ar-jo"
+fromBCP47' (Just (Lang "ar" _ "LB" _)     ) = Just "ar-lb"
+fromBCP47' (Just (Lang "ar" _ "DZ" _)     ) = Just "ar-dz"
+fromBCP47' (Just (Lang "ar" _ "MA" _)     ) = Just "ar-ma"
+fromBCP47' (Just (Lang "de" _ _ ["1901"]) ) = Just "deo"
+fromBCP47' (Just (Lang "de" _ "DE" _)     ) = Just "de-de"
+fromBCP47' (Just (Lang "de" _ "AT" _)     ) = Just "de-at"
+fromBCP47' (Just (Lang "de" _ "CH" _)     ) = Just "de-ch"
+fromBCP47' (Just (Lang "el" _ _ ["poly"]) ) = Just "agr"
+fromBCP47' (Just (Lang "en" _ "US" _)     ) = Just "en-us"
+fromBCP47' (Just (Lang "en" _ "GB" _)     ) = Just "en-gb"
+fromBCP47' (Just (Lang "grc"_  _ _)       ) = Just "agr"
+fromBCP47' (Just (Lang "el" _ _ _)        ) = Just "gr"
+fromBCP47' (Just (Lang "eu" _ _ _)        ) = Just "ba"
+fromBCP47' (Just (Lang "he" _ _ _)        ) = Just "il"
+fromBCP47' (Just (Lang "jp" _ _ _)        ) = Just "ja"
+fromBCP47' (Just (Lang "uk" _ _ _)        ) = Just "ua"
+fromBCP47' (Just (Lang "vi" _ _ _)        ) = Just "vn"
+fromBCP47' (Just (Lang "zh" _ _ _)        ) = Just "cn"
+fromBCP47' (Just (Lang l _ _ _)           ) = Just l
+fromBCP47' Nothing                          = Nothing

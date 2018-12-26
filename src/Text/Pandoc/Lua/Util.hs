@@ -1,6 +1,6 @@
 {-
-Copyright © 2012-2017 John MacFarlane <jgm@berkeley.edu>
-            2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+Copyright © 2012-2018 John MacFarlane <jgm@berkeley.edu>
+            2017-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,8 +19,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 {-# LANGUAGE FlexibleInstances #-}
 {- |
    Module      : Text.Pandoc.Lua.Util
-   Copyright   : © 2012–2016 John MacFarlane,
-                 © 2017 Albert Krewinkel
+   Copyright   : © 2012–2018 John MacFarlane,
+                 © 2017-2018 Albert Krewinkel
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -29,110 +29,159 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 Lua utility functions.
 -}
 module Text.Pandoc.Lua.Util
-  ( adjustIndexBy
+  ( getTag
   , getTable
-  , setTable
   , addValue
+  , addFunction
   , getRawInt
   , setRawInt
   , addRawInt
-  , keyValuePairs
+  , typeCheck
+  , raiseError
+  , popValue
   , PushViaCall
   , pushViaCall
   , pushViaConstructor
+  , loadScriptFromDataDir
+  , dostring'
   ) where
 
-import Scripting.Lua (LuaState, StackValue (..), call, getglobal2, gettable,
-                      next, pop, pushnil, rawgeti, rawseti, settable)
+import Control.Monad (when)
+import Control.Monad.Catch (finally)
+import Data.ByteString.Char8 (unpack)
+import Foreign.Lua (FromLuaStack (..), NumResults, Lua, NumArgs, StackIndex,
+                    ToLuaStack (..), ToHaskellFunction)
+import Foreign.Lua.Api (Status, call, pop, rawget, rawgeti, rawset, rawseti)
+import Text.Pandoc.Class (readDataFile, runIOorExplode, setUserDataDir)
+
+import qualified Foreign.Lua as Lua
 
 -- | Adjust the stack index, assuming that @n@ new elements have been pushed on
 -- the stack.
-adjustIndexBy :: Int -> Int -> Int
+adjustIndexBy :: StackIndex -> StackIndex -> StackIndex
 adjustIndexBy idx n =
   if idx < 0
   then idx - n
   else idx
 
 -- | Get value behind key from table at given index.
-getTable :: (StackValue a, StackValue b) => LuaState -> Int -> a -> IO (Maybe b)
-getTable lua idx key = do
-  push lua key
-  gettable lua (idx `adjustIndexBy` 1)
-  peek lua (-1) <* pop lua 1
+getTable :: (ToLuaStack a, FromLuaStack b) => StackIndex -> a -> Lua b
+getTable idx key = do
+  push key
+  rawget (idx `adjustIndexBy` 1)
+  popValue
 
--- | Set value for key for table at the given index
-setTable :: (StackValue a, StackValue b) => LuaState -> Int -> a -> b -> IO ()
-setTable lua idx key value = do
-  push lua key
-  push lua value
-  settable lua (idx `adjustIndexBy` 2)
+-- | Add a key-value pair to the table at the top of the stack.
+addValue :: (ToLuaStack a, ToLuaStack b) => a -> b -> Lua ()
+addValue key value = do
+  push key
+  push value
+  rawset (-3)
 
--- | Add a key-value pair to the table at the top of the stack
-addValue :: (StackValue a, StackValue b) => LuaState -> a -> b -> IO ()
-addValue lua = setTable lua (-1)
+-- | Add a function to the table at the top of the stack, using the given name.
+addFunction :: ToHaskellFunction a => String -> a -> Lua ()
+addFunction name fn = do
+  Lua.push name
+  Lua.pushHaskellFunction fn
+  Lua.wrapHaskellFunction
+  Lua.rawset (-3)
 
 -- | Get value behind key from table at given index.
-getRawInt :: StackValue a => LuaState -> Int -> Int -> IO (Maybe a)
-getRawInt lua idx key =
-  rawgeti lua idx key
-  *> peek lua (-1)
-  <* pop lua 1
+getRawInt :: FromLuaStack a => StackIndex -> Int -> Lua a
+getRawInt idx key = do
+  rawgeti idx key
+  popValue
 
 -- | Set numeric key/value in table at the given index
-setRawInt :: StackValue a => LuaState -> Int -> Int -> a -> IO ()
-setRawInt lua idx key value = do
-  push lua value
-  rawseti lua (idx `adjustIndexBy` 1) key
+setRawInt :: ToLuaStack a => StackIndex -> Int -> a -> Lua ()
+setRawInt idx key value = do
+  push value
+  rawseti (idx `adjustIndexBy` 1) key
 
 -- | Set numeric key/value in table at the top of the stack.
-addRawInt :: StackValue a => LuaState -> Int -> a -> IO ()
-addRawInt lua = setRawInt lua (-1)
+addRawInt :: ToLuaStack a => Int -> a -> Lua ()
+addRawInt = setRawInt (-1)
 
--- | Try reading the table under the given index as a list of key-value pairs.
-keyValuePairs :: (StackValue a, StackValue b)
-              => LuaState -> Int -> IO (Maybe [(a, b)])
-keyValuePairs lua idx = do
-  pushnil lua
-  sequence <$> remainingPairs
- where
-  remainingPairs = do
-    res <- nextPair
-    case res of
-      Nothing -> return []
-      Just a  -> (a:) <$> remainingPairs
-  nextPair :: (StackValue a, StackValue b) => IO (Maybe (Maybe (a,b)))
-  nextPair = do
-    hasNext <- next lua (idx `adjustIndexBy` 1)
-    if hasNext
-      then do
-        val <- peek lua (-1)
-        key <- peek lua (-2)
-        pop lua 1 -- removes the value, keeps the key
-        return $ Just <$> ((,) <$> key <*> val)
-      else do
-        return Nothing
+typeCheck :: StackIndex -> Lua.Type -> Lua ()
+typeCheck idx expected = do
+  actual <- Lua.ltype idx
+  when (actual /= expected) $ do
+    expName <- Lua.typename expected
+    actName <- Lua.typename actual
+    Lua.throwLuaError $ "expected " ++ expName ++ " but got " ++ actName ++ "."
+
+raiseError :: ToLuaStack a => a -> Lua NumResults
+raiseError e = do
+  Lua.push e
+  fromIntegral <$> Lua.lerror
+
+-- | Get, then pop the value at the top of the stack.
+popValue :: FromLuaStack a => Lua a
+popValue = do
+  resOrError <- Lua.peekEither (-1)
+  pop 1
+  case resOrError of
+    Left err -> Lua.throwLuaError err
+    Right x -> return x
 
 -- | Helper class for pushing a single value to the stack via a lua function.
 -- See @pushViaCall@.
 class PushViaCall a where
-  pushViaCall' :: LuaState -> String -> IO () -> Int -> a
+  pushViaCall' :: String -> Lua () -> NumArgs -> a
 
-instance PushViaCall (IO ()) where
-  pushViaCall' lua fn pushArgs num = do
-    getglobal2 lua fn
+instance PushViaCall (Lua ()) where
+  pushViaCall' fn pushArgs num = do
+    Lua.push fn
+    Lua.rawget (Lua.registryindex)
     pushArgs
-    call lua num 1
+    call num 1
 
-instance (StackValue a, PushViaCall b) => PushViaCall (a -> b) where
-  pushViaCall' lua fn pushArgs num x =
-    pushViaCall' lua fn (pushArgs *> push lua x) (num + 1)
+instance (ToLuaStack a, PushViaCall b) => PushViaCall (a -> b) where
+  pushViaCall' fn pushArgs num x =
+    pushViaCall' fn (pushArgs *> push x) (num + 1)
 
 -- | Push an value to the stack via a lua function. The lua function is called
 -- with all arguments that are passed to this function and is expected to return
 -- a single value.
-pushViaCall :: PushViaCall a => LuaState -> String -> a
-pushViaCall lua fn = pushViaCall' lua fn (return ()) 0
+pushViaCall :: PushViaCall a => String -> a
+pushViaCall fn = pushViaCall' fn (return ()) 0
 
 -- | Call a pandoc element constructor within lua, passing all given arguments.
-pushViaConstructor :: PushViaCall a => LuaState -> String -> a
-pushViaConstructor lua pandocFn = pushViaCall lua ("pandoc." ++ pandocFn)
+pushViaConstructor :: PushViaCall a => String -> a
+pushViaConstructor pandocFn = pushViaCall ("pandoc." ++ pandocFn)
+
+-- | Load a file from pandoc's data directory.
+loadScriptFromDataDir :: Maybe FilePath -> FilePath -> Lua ()
+loadScriptFromDataDir datadir scriptFile = do
+  script <- fmap unpack . Lua.liftIO . runIOorExplode $
+            setUserDataDir datadir >> readDataFile scriptFile
+  status <- dostring' script
+  when (status /= Lua.OK) .
+    Lua.throwTopMessageAsError' $ \msg ->
+      "Couldn't load '" ++ scriptFile ++ "'.\n" ++ msg
+
+-- | Load a string and immediately perform a full garbage collection. This is
+-- important to keep the program from hanging: If the program contained a call
+-- to @require@, the a new loader function was created which then become
+-- garbage. If that function is collected at an inopportune times, i.e. when the
+-- Lua API is called via a function that doesn't allow calling back into Haskell
+-- (getraw, setraw, …), then the function's finalizer, and the full program,
+-- will hang.
+dostring' :: String -> Lua Status
+dostring' script = do
+  loadRes <- Lua.loadstring script
+  if loadRes == Lua.OK
+    then Lua.pcall 0 1 Nothing <* Lua.gc Lua.GCCOLLECT 0
+    else return loadRes
+
+-- | Get the tag of a value. This is an optimized and specialized version of
+-- @Lua.getfield idx "tag"@. It only checks for the field on the table at index
+-- @idx@ and on its metatable, also ignoring any @__index@ value on the
+-- metatable.
+getTag :: StackIndex -> Lua String
+getTag idx = do
+  top <- Lua.gettop
+  hasMT <- Lua.getmetatable idx
+  push "tag"
+  if hasMT then Lua.rawget (-2) else Lua.rawget (idx `adjustIndexBy` 1)
+  peek Lua.stackTop `finally` Lua.settop top

@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2008-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2008-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.DokuWiki
-   Copyright   : Copyright (C) 2008-2017 John MacFarlane
+   Copyright   : Copyright (C) 2008-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Clare Macrae <clare.macrae@googlemail.com>
@@ -41,14 +41,14 @@ DokuWiki:  <https://www.dokuwiki.org/dokuwiki>
 module Text.Pandoc.Writers.DokuWiki ( writeDokuWiki ) where
 import Control.Monad (zipWithM)
 import Control.Monad.Reader (ReaderT, ask, local, runReaderT)
-import Control.Monad.State.Strict (StateT, evalStateT, gets, modify)
+import Control.Monad.State.Strict (StateT, evalStateT)
 import Data.Default (Default (..))
 import Data.List (intercalate, intersect, isPrefixOf, transpose)
 import Data.Text (Text, pack)
 import Text.Pandoc.Class (PandocMonad, report)
-import Text.Pandoc.Logging
 import Text.Pandoc.Definition
 import Text.Pandoc.ImageSize
+import Text.Pandoc.Logging
 import Text.Pandoc.Options (WrapOption (..), WriterOptions (writerTableOfContents, writerTemplate, writerWrapText))
 import Text.Pandoc.Shared (camelCaseToHyphenated, escapeURI, isURI, linesToPara,
                            removeFormatting, substitute, trimr)
@@ -56,7 +56,6 @@ import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.Writers.Shared (defField, metaToJSON)
 
 data WriterState = WriterState {
-    stNotes     :: Bool            -- True if there are notes
   }
 
 data WriterEnvironment = WriterEnvironment {
@@ -66,7 +65,7 @@ data WriterEnvironment = WriterEnvironment {
   }
 
 instance Default WriterState where
-  def = WriterState { stNotes = False }
+  def = WriterState {}
 
 instance Default WriterEnvironment where
   def = WriterEnvironment { stIndent = ""
@@ -92,15 +91,9 @@ pandocToDokuWiki opts (Pandoc meta blocks) = do
               (inlineListToDokuWiki opts)
               meta
   body <- blockListToDokuWiki opts blocks
-  notesExist <- gets stNotes
-  let notes = if notesExist
-                 then "" -- TODO Was "\n<references />" Check whether I can really remove this:
-                         -- if it is definitely to do with footnotes, can remove this whole bit
-                 else ""
-  let main = pack $ body ++ notes
+  let main = pack body
   let context = defField "body" main
-                $ defField "toc" (writerTableOfContents opts)
-                $ metadata
+                $ defField "toc" (writerTableOfContents opts) metadata
   case writerTemplate opts of
        Nothing  -> return main
        Just tpl -> renderTemplate' tpl context
@@ -155,7 +148,8 @@ blockToDokuWiki _ b@(RawBlock f str)
   -- See https://www.dokuwiki.org/wiki:syntax
   -- use uppercase HTML tag for block-level content:
   | f == Format "html"     = return $ "<HTML>\n" ++ str ++ "\n</HTML>"
-  | otherwise              = "" <$ (report $ BlockNotRendered b)
+  | otherwise              = "" <$
+         report (BlockNotRendered b)
 
 blockToDokuWiki _ HorizontalRule = return "\n----\n"
 
@@ -199,7 +193,7 @@ blockToDokuWiki opts (Table capt aligns _ headers rows) = do
   rows' <- mapM (zipWithM (tableItemToDokuWiki opts) aligns) rows
   let widths = map (maximum . map length) $ transpose (headers':rows')
   let padTo (width, al) s =
-          case (width - length s) of
+          case width - length s of
                x | x > 0 ->
                  if al == AlignLeft || al == AlignDefault
                     then s ++ replicate x ' '
@@ -291,10 +285,10 @@ listItemToDokuWiki opts items = do
        bs <- mapM (blockToDokuWiki opts) items
        let contents = case items of
                            [_, CodeBlock _ _] -> concat bs
-                           _ -> vcat bs
+                           _                  -> vcat bs
        indent <- stIndent <$> ask
        backSlash <- stBackSlashLB <$> ask
-       let indent' = if backSlash then (drop 2 indent) else indent
+       let indent' = if backSlash then drop 2 indent else indent
        return $ indent' ++ "* " ++ contents
 
 -- | Convert ordered list item (list of blocks) to DokuWiki.
@@ -308,7 +302,7 @@ orderedListItemToDokuWiki opts items = do
      else do
        indent <- stIndent <$> ask
        backSlash <- stBackSlashLB <$> ask
-       let indent' = if backSlash then (drop 2 indent) else indent
+       let indent' = if backSlash then drop 2 indent else indent
        return $ indent' ++ "- " ++ contents
 
 -- | Convert definition list item (label, list of blocks) to DokuWiki.
@@ -322,11 +316,11 @@ definitionListItemToDokuWiki opts (label, items) = do
   useTags <- stUseTags <$> ask
   if useTags
      then return $ "<HTML><dt></HTML>" ++ labelText ++ "<HTML></dt></HTML>\n" ++
-           (intercalate "\n" $ map (\d -> "<HTML><dd></HTML>" ++ d ++ "<HTML></dd></HTML>") contents)
+           intercalate "\n" (map (\d -> "<HTML><dd></HTML>" ++ d ++ "<HTML></dd></HTML>") contents)
      else do
        indent <- stIndent <$> ask
        backSlash <- stBackSlashLB <$> ask
-       let indent' = if backSlash then (drop 2 indent) else indent
+       let indent' = if backSlash then drop 2 indent else indent
        return $ indent' ++ "* **" ++ labelText ++ "** " ++ concat contents
 
 -- | True if the list can be handled by simple wiki markup, False if HTML tags will be needed.
@@ -419,7 +413,7 @@ consolidateRawBlocks (x:xs) = x : consolidateRawBlocks xs
 inlineListToDokuWiki :: PandocMonad m
                      => WriterOptions -> [Inline] -> DokuWiki m String
 inlineListToDokuWiki opts lst =
-  concat <$> (mapM (inlineToDokuWiki opts) lst)
+  concat <$> mapM (inlineToDokuWiki opts) lst
 
 -- | Convert Pandoc inline element to DokuWiki.
 inlineToDokuWiki :: PandocMonad m
@@ -518,7 +512,6 @@ inlineToDokuWiki opts (Image attr alt (source, tit)) = do
 
 inlineToDokuWiki opts (Note contents) = do
   contents' <- blockListToDokuWiki opts contents
-  modify (\s -> s { stNotes = True })
   return $ "((" ++ contents' ++ "))"
   -- note - may not work for notes with multiple blocks
 

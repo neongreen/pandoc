@@ -1,6 +1,6 @@
 {-
 Copyright (C) 2010-2012 Paul Rivier <paul*rivier#demotera*com> | tr '*#' '.@'
-              2010-2017 John MacFarlane
+              2010-2018 John MacFarlane
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 {- |
    Module      : Text.Pandoc.Readers.Textile
    Copyright   : Copyright (C) 2010-2012 Paul Rivier
-                               2010-2017 John MacFarlane
+                               2010-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Paul Rivier <paul*rivier#demotera*com>
@@ -57,20 +57,20 @@ import Control.Monad.Except (throwError)
 import Data.Char (digitToInt, isUpper)
 import Data.List (intercalate, intersperse, transpose)
 import Data.Monoid ((<>))
+import Data.Text (Text)
+import qualified Data.Text as T
 import Text.HTML.TagSoup (Tag (..), fromAttrib)
 import Text.HTML.TagSoup.Match
 import Text.Pandoc.Builder (Blocks, Inlines, trimInlines)
 import qualified Text.Pandoc.Builder as B
-import Text.Pandoc.Class (PandocMonad(..))
+import Text.Pandoc.Class (PandocMonad (..))
 import Text.Pandoc.CSS
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Parsing
 import Text.Pandoc.Readers.HTML (htmlTag, isBlockTag, isInlineTag)
 import Text.Pandoc.Readers.LaTeX (rawLaTeXBlock, rawLaTeXInline)
-import Text.Pandoc.Shared (trim, crFilter)
-import Data.Text (Text)
-import qualified Data.Text as T
+import Text.Pandoc.Shared (crFilter, trim, underlineSpan)
 
 -- | Parse a Textile text and return a Pandoc document.
 readTextile :: PandocMonad m
@@ -110,7 +110,7 @@ noteBlock = try $ do
   startPos <- getPosition
   ref <- noteMarker
   optional blankline
-  contents <- liftM unlines $ many1Till anyLine (blanklines <|> noteBlock)
+  contents <- unlines <$> many1Till anyLine (blanklines <|> noteBlock)
   endPos <- getPosition
   let newnote = (ref, contents ++ "\n")
   st <- getState
@@ -178,7 +178,6 @@ codeBlockPre :: PandocMonad m => ParserT [Char] ParserState m Blocks
 codeBlockPre = try $ do
   (t@(TagOpen _ attrs),_) <- htmlTag (tagOpen (=="pre") (const True))
   result' <- manyTill anyChar (htmlTag (tagClose (=="pre")))
-  optional blanklines
   -- drop leading newline if any
   let result'' = case result' of
                       '\n':xs -> xs
@@ -262,10 +261,11 @@ orderedListItemAtDepth = genericListItemAtDepth '#'
 genericListItemAtDepth :: PandocMonad m => Char -> Int -> ParserT [Char] ParserState m Blocks
 genericListItemAtDepth c depth = try $ do
   count depth (char c) >> attributes >> whitespace
-  p <- mconcat <$> many listInline
+  contents <- mconcat <$> many ((B.plain . mconcat <$> many1 inline) <|>
+                                try (newline >> codeBlockPre))
   newline
   sublist <- option mempty (anyListAtDepth (depth + 1))
-  return $ (B.plain p) <> sublist
+  return $ contents <> sublist
 
 -- | A definition list is a set of consecutive definition items
 definitionList :: PandocMonad m => ParserT [Char] ParserState m Blocks
@@ -295,10 +295,6 @@ definitionListStart = try $ do
     <|> try (lookAhead (() <$ string ":="))
      )
 
-listInline :: PandocMonad m => ParserT [Char] ParserState m Inlines
-listInline = try (notFollowedBy newline >> inline)
-         <|> try (endline <* notFollowedBy listStart)
-
 -- | A definition list item in textile begins with '- ', followed by
 -- the term defined, then spaces and ":=". The definition follows, on
 -- the same single line, or spaned on multiple line, after a line
@@ -310,7 +306,7 @@ definitionListItem = try $ do
   return (term, def')
   where inlineDef :: PandocMonad m => ParserT [Char] ParserState m [Blocks]
         inlineDef = liftM (\d -> [B.plain d])
-                    $ optional whitespace >> (trimInlines . mconcat <$> many listInline) <* newline
+                    $ optional whitespace >> (trimInlines . mconcat <$> many inline) <* newline
         multilineDef :: PandocMonad m => ParserT [Char] ParserState m [Blocks]
         multilineDef = try $ do
           optional whitespace >> newline
@@ -364,7 +360,7 @@ cellAttributes = try $ do
 tableCell :: PandocMonad m => ParserT [Char] ParserState m ((Bool, Alignment), Blocks)
 tableCell = try $ do
   char '|'
-  (isHeader, alignment) <- option (False, AlignDefault) $ cellAttributes
+  (isHeader, alignment) <- option (False, AlignDefault) cellAttributes
   notFollowedBy blankline
   raw <- trim <$>
          many (noneOf "|\n" <|> try (char '\n' <* notFollowedBy blankline))
@@ -391,7 +387,7 @@ table = try $ do
     char '.'
     rawcapt <- trim <$> anyLine
     parseFromString' (mconcat <$> many inline) rawcapt
-  rawrows <- many1 $ (skipMany ignorableRow) >> tableRow
+  rawrows <- many1 $ skipMany ignorableRow >> tableRow
   skipMany ignorableRow
   blanklines
   let (headers, rows) = case rawrows of
@@ -442,8 +438,7 @@ maybeExplicitBlock name blk = try $ do
 
 -- | Any inline element
 inline :: PandocMonad m => ParserT [Char] ParserState m Inlines
-inline = do
-    choice inlineParsers <?> "inline"
+inline = choice inlineParsers <?> "inline"
 
 -- | Inline parsers tried in order
 inlineParsers :: PandocMonad m => [ParserT [Char] ParserState m Inlines]
@@ -472,7 +467,7 @@ inlineMarkup = choice [ simpleInline (string "??") (B.cite [])
                       , simpleInline (string "__") B.emph
                       , simpleInline (char '*') B.strong
                       , simpleInline (char '_') B.emph
-                      , simpleInline (char '+') B.emph  -- approximates underline
+                      , simpleInline (char '+') underlineSpan
                       , simpleInline (char '-' <* notFollowedBy (char '-')) B.strikeout
                       , simpleInline (char '^') B.superscript
                       , simpleInline (char '~') B.subscript
@@ -504,7 +499,7 @@ copy = do
 
 note :: PandocMonad m => ParserT [Char] ParserState m Inlines
 note = try $ do
-  ref <- (char '[' *> many1 digit <* char ']')
+  ref <- char '[' *> many1 digit <* char ']'
   notes <- stateNotes <$> getState
   case lookup ref notes of
     Nothing  -> fail "note not found"
@@ -535,7 +530,7 @@ hyphenedWords = do
 wordChunk :: PandocMonad m => ParserT [Char] ParserState m String
 wordChunk = try $ do
   hd <- noneOf wordBoundaries
-  tl <- many ( (noneOf wordBoundaries) <|>
+  tl <- many ( noneOf wordBoundaries <|>
                try (notFollowedBy' note *> oneOf markupChars
                      <* lookAhead (noneOf wordBoundaries) ) )
   return $ hd:tl
@@ -614,12 +609,12 @@ escapedInline = escapedEqs <|> escapedTag
 
 escapedEqs :: PandocMonad m => ParserT [Char] ParserState m Inlines
 escapedEqs = B.str <$>
-  (try $ string "==" *> manyTill anyChar' (try $ string "=="))
+  try (string "==" *> manyTill anyChar' (try $ string "=="))
 
 -- | literal text escaped btw <notextile> tags
 escapedTag :: PandocMonad m => ParserT [Char] ParserState m Inlines
 escapedTag = B.str <$>
-  (try $ string "<notextile>" *>
+  try (string "<notextile>" *>
          manyTill anyChar' (try $ string "</notextile>"))
 
 -- | Any special symbol defined in wordBoundaries
@@ -635,7 +630,8 @@ code = code1 <|> code2
 -- any character except a newline before a blank line
 anyChar' :: PandocMonad m => ParserT [Char] ParserState m Char
 anyChar' =
-  satisfy (/='\n') <|> (try $ char '\n' <* notFollowedBy blankline)
+  satisfy (/='\n') <|>
+  try (char '\n' <* notFollowedBy blankline)
 
 code1 :: PandocMonad m => ParserT [Char] ParserState m Inlines
 code1 = B.code <$> surrounded (char '@') anyChar'
@@ -647,7 +643,7 @@ code2 = do
 
 -- | Html / CSS attributes
 attributes :: PandocMonad m => ParserT [Char] ParserState m Attr
-attributes = (foldl (flip ($)) ("",[],[])) <$>
+attributes = foldl (flip ($)) ("",[],[]) <$>
   try (do special <- option id specialAttribute
           attrs <- many attribute
           return (special : attrs))

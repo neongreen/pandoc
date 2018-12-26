@@ -1,13 +1,12 @@
-{-# LANGUAGE
-  FlexibleContexts
-, GeneralizedNewtypeDeriving
-, TypeSynonymInstances
-, MultiParamTypeClasses
-, FlexibleInstances
-, IncoherentInstances #-}
-
+{-# LANGUAGE ExplicitForAll             #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE IncoherentInstances        #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE TypeSynonymInstances       #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -26,7 +25,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Parsing
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -41,6 +40,8 @@ module Text.Pandoc.Parsing ( takeWhileP,
                              anyLineNewline,
                              indentWith,
                              many1Till,
+                             manyUntil,
+                             sepBy1',
                              notFollowedBy',
                              oneOfStrings,
                              oneOfStringsCI,
@@ -49,6 +50,8 @@ module Text.Pandoc.Parsing ( takeWhileP,
                              skipSpaces,
                              blankline,
                              blanklines,
+                             gobbleSpaces,
+                             gobbleAtMostSpaces,
                              enclosed,
                              stringAnyCase,
                              parseFromString,
@@ -64,6 +67,11 @@ module Text.Pandoc.Parsing ( takeWhileP,
                              withRaw,
                              escaped,
                              characterReference,
+                             upperRoman,
+                             lowerRoman,
+                             decimal,
+                             lowerAlpha,
+                             upperAlpha,
                              anyOrderedListMarker,
                              orderedListMarker,
                              charRef,
@@ -179,40 +187,41 @@ module Text.Pandoc.Parsing ( takeWhileP,
                              sourceLine,
                              setSourceColumn,
                              setSourceLine,
+                             incSourceColumn,
                              newPos,
                              Line,
                              Column
                              )
 where
 
-import Data.Text (Text)
-import Text.Pandoc.Definition
-import Text.Pandoc.Options
-import Text.Pandoc.Builder (Blocks, Inlines, HasMeta(..), trimInlines)
-import qualified Text.Pandoc.Builder as B
-import Text.Pandoc.XML (fromEntities)
-import qualified Text.Pandoc.UTF8 as UTF8 (putStrLn)
-import Text.Parsec hiding (token)
-import Text.Parsec.Pos (newPos, initialPos, updatePosString)
-import Data.Char ( toLower, toUpper, ord, chr, isAscii, isAlphaNum,
-                   isHexDigit, isSpace, isPunctuation )
-import Data.List ( intercalate, transpose, isSuffixOf )
-import Text.Pandoc.Shared
-import qualified Data.Map as M
-import Text.Pandoc.Readers.LaTeX.Types (Macro)
-import Text.HTML.TagSoup.Entity ( lookupEntity )
-import Text.Pandoc.Asciify (toAsciiChar)
-import Data.Monoid ((<>))
-import Text.Pandoc.Class (PandocMonad, readFileFromDirs, report)
-import Text.Pandoc.Logging
-import Data.Default
-import qualified Data.Set as Set
-import Control.Monad.Reader
 import Control.Monad.Identity
-import Data.Maybe (catMaybes)
+import Control.Monad.Reader
+import Data.Char (chr, isAlphaNum, isAscii, isAsciiUpper, isHexDigit,
+                  isPunctuation, isSpace, ord, toLower, toUpper)
+import Data.Default
+import Data.List (intercalate, isSuffixOf, transpose)
+import qualified Data.Map as M
+import Data.Maybe (mapMaybe, fromMaybe)
+import Data.Monoid ((<>))
+import qualified Data.Set as Set
+import Data.Text (Text)
+import Text.HTML.TagSoup.Entity (lookupEntity)
+import Text.Pandoc.Asciify (toAsciiChar)
+import Text.Pandoc.Builder (Blocks, HasMeta (..), Inlines, trimInlines)
+import qualified Text.Pandoc.Builder as B
+import Text.Pandoc.Class (PandocMonad, readFileFromDirs, report)
+import Text.Pandoc.Definition
+import Text.Pandoc.Logging
+import Text.Pandoc.Options
+import Text.Pandoc.Readers.LaTeX.Types (Macro)
+import Text.Pandoc.Shared
+import qualified Text.Pandoc.UTF8 as UTF8 (putStrLn)
+import Text.Pandoc.XML (fromEntities)
+import Text.Parsec hiding (token)
+import Text.Parsec.Pos (initialPos, newPos, updatePosString)
 
-import Text.Pandoc.Error
 import Control.Monad.Except
+import Text.Pandoc.Error
 
 type Parser t s = Parsec t s
 
@@ -302,7 +311,7 @@ indentWith :: Stream s m Char
            => Int -> ParserT s st m [Char]
 indentWith num = do
   tabStop <- getOption readerTabStop
-  if (num < tabStop)
+  if num < tabStop
      then count num (char ' ')
      else choice [ try (count num (char ' '))
                  , try (char '\t' >> indentWith (num - tabStop)) ]
@@ -317,6 +326,28 @@ many1Till p end = do
          first <- p
          rest <- manyTill p end
          return (first:rest)
+
+-- | Like @manyTill@, but also returns the result of end parser.
+manyUntil :: (Stream s m t)
+          => ParserT s u m a
+          -> ParserT s u m b
+          -> ParserT s u m ([a], b)
+manyUntil p end = scan
+  where scan =
+          (do e <- end
+              return ([], e)
+          ) <|>
+          (do x <- p
+              (xs, e) <- scan
+              return (x:xs, e))
+
+-- | Like @sepBy1@ from Parsec,
+-- but does not fail if it @sep@ succeeds and @p@ fails.
+sepBy1' :: (Stream s m t)
+        => ParsecT s u m a
+        -> ParsecT s u m sep
+        -> ParsecT s u m [a]
+sepBy1' p sep = (:) <$> p <*> many (try $ sep >> p)
 
 -- | A more general form of @notFollowedBy@.  This one allows any
 -- type of parser to be specified, and succeeds only if that parser fails.
@@ -353,7 +384,7 @@ oneOfStringsCI = oneOfStrings' ciMatch
         -- this optimizes toLower by checking common ASCII case
         -- first, before calling the expensive unicode-aware
         -- function:
-        toLower' c | c >= 'A' && c <= 'Z' = chr (ord c + 32)
+        toLower' c | isAsciiUpper c = chr (ord c + 32)
                    | isAscii c = c
                    | otherwise = toLower c
 
@@ -376,6 +407,36 @@ blankline = try $ skipSpaces >> newline
 -- | Parses one or more blank lines and returns a string of newlines.
 blanklines :: Stream s m Char => ParserT s st m [Char]
 blanklines = many1 blankline
+
+-- | Gobble n spaces; if tabs are encountered, expand them
+-- and gobble some or all of their spaces, leaving the rest.
+gobbleSpaces :: (HasReaderOptions st, Monad m)
+             => Int -> ParserT [Char] st m ()
+gobbleSpaces 0 = return ()
+gobbleSpaces n
+  | n < 0     = error "gobbleSpaces called with negative number"
+  | otherwise = try $ do
+      char ' ' <|> eatOneSpaceOfTab
+      gobbleSpaces (n - 1)
+
+eatOneSpaceOfTab :: (HasReaderOptions st, Monad m) => ParserT [Char] st m Char
+eatOneSpaceOfTab = do
+  char '\t'
+  tabstop <- getOption readerTabStop
+  inp <- getInput
+  setInput $ replicate (tabstop - 1) ' ' ++ inp
+  return ' '
+
+-- | Gobble up to n spaces; if tabs are encountered, expand them
+-- and gobble some or all of their spaces, leaving the rest.
+gobbleAtMostSpaces :: (HasReaderOptions st, Monad m)
+                   => Int -> ParserT [Char] st m Int
+gobbleAtMostSpaces 0 = return 0
+gobbleAtMostSpaces n
+  | n < 0     = error "gobbleAtMostSpaces called with negative number"
+  | otherwise = option 0 $ do
+      char ' ' <|> eatOneSpaceOfTab
+      (+ 1) <$> gobbleAtMostSpaces (n - 1)
 
 -- | Parses material enclosed between start and end parsers.
 enclosed :: (Show end, Stream s  m Char) => ParserT s st m t   -- ^ start parser
@@ -466,19 +527,19 @@ romanNumeral upperCase = do
     lookAhead $ oneOf romanDigits
     let [one, five, ten, fifty, hundred, fivehundred, thousand] =
           map char romanDigits
-    thousands <- many thousand >>= (return . (1000 *) . length)
+    thousands <- ((1000 *) . length) <$> many thousand
     ninehundreds <- option 0 $ try $ hundred >> thousand >> return 900
-    fivehundreds <- many fivehundred >>= (return . (500 *) . length)
+    fivehundreds <- ((500 *) . length) <$> many fivehundred
     fourhundreds <- option 0 $ try $ hundred >> fivehundred >> return 400
-    hundreds <- many hundred >>= (return . (100 *) . length)
+    hundreds <- ((100 *) . length) <$> many hundred
     nineties <- option 0 $ try $ ten >> hundred >> return 90
-    fifties <- many fifty >>= (return . (50 *) . length)
+    fifties <- ((50 *) . length) <$> many fifty
     forties <- option 0 $ try $ ten >> fifty >> return 40
-    tens <- many ten >>= (return . (10 *) . length)
+    tens <- ((10 *) . length) <$> many ten
     nines <- option 0 $ try $ one >> ten >> return 9
-    fives <- many five >>= (return . (5 *) . length)
+    fives <- ((5 *) . length) <$> many five
     fours <- option 0 $ try $ one >> five >> return 4
-    ones <- many one >>= (return . length)
+    ones <- length <$> many one
     let total = thousands + ninehundreds + fivehundreds + fourhundreds +
                 hundreds + nineties + fifties + forties + tens + nines +
                 fives + fours + ones
@@ -494,8 +555,8 @@ emailAddress :: Stream s m Char => ParserT s st m (String, String)
 emailAddress = try $ toResult <$> mailbox <*> (char '@' *> domain)
  where toResult mbox dom = let full = fromEntities $ mbox ++ '@':dom
                            in  (full, escapeURI $ "mailto:" ++ full)
-       mailbox           = intercalate "." <$> (emailWord `sepby1` dot)
-       domain            = intercalate "." <$> (subdomain `sepby1` dot)
+       mailbox           = intercalate "." <$> (emailWord `sepBy1'` dot)
+       domain            = intercalate "." <$> (subdomain `sepBy1'` dot)
        dot               = char '.'
        subdomain         = many1 $ alphaNum <|> innerPunct
        -- this excludes some valid email addresses, since an
@@ -512,9 +573,6 @@ emailAddress = try $ toResult <$> mailbox <*> (char '@' *> domain)
                               return (x:xs)
        isEmailChar c     = isAlphaNum c || isEmailPunct c
        isEmailPunct c    = c `elem` "!\"#$%&'*+-/=?^_{|}~;"
-       -- note: sepBy1 from parsec consumes input when sep
-       -- succeeds and p fails, so we use this variant here.
-       sepby1 p sep      = (:) <$> p <*> (many (try $ sep >> p))
 
 
 uriScheme :: Stream s m Char => ParserT s st m String
@@ -532,16 +590,16 @@ uri = try $ do
   -- http://en.wikipedia.org/wiki/State_of_emergency_(disambiguation)
   -- as a URL, while NOT picking up the closing paren in
   -- (http://wikipedia.org). So we include balanced parens in the URL.
-  let isWordChar c = isAlphaNum c || c `elem` "#$%*+/@\\_-"
+  let isWordChar c = isAlphaNum c || c `elem` "#$%*+/@\\_-&="
   let wordChar = satisfy isWordChar
   let percentEscaped = try $ char '%' >> skipMany1 (satisfy isHexDigit)
   let entity = () <$ characterReference
   let punct = skipMany1 (char ',')
-          <|> () <$ (satisfy (\c -> not (isSpace c) && c /= '<' && c /= '>'))
+          <|> () <$ satisfy (\c -> not (isSpace c) && c /= '<' && c /= '>')
   let uriChunk =  skipMany1 wordChar
               <|> percentEscaped
               <|> entity
-              <|> (try $ punct >>
+              <|> try (punct >>
                     lookAhead (void (satisfy isWordChar) <|> percentEscaped))
   str <- snd <$> withRaw (skipMany1 ( () <$
                                          (enclosed (char '(') (char ')') uriChunk
@@ -555,7 +613,7 @@ uri = try $ do
 mathInlineWith :: Stream s m Char  => String -> String -> ParserT s st m String
 mathInlineWith op cl = try $ do
   string op
-  notFollowedBy space
+  when (op == "$") $ notFollowedBy space
   words' <- many1Till (count 1 (noneOf " \t\n\\")
                    <|> (char '\\' >>
                            -- This next clause is needed because \text{..} can
@@ -569,7 +627,7 @@ mathInlineWith op cl = try $ do
                           return " "
                     ) (try $ string cl)
   notFollowedBy digit  -- to prevent capture of $5
-  return $ concat words'
+  return $ trim $ concat words'
  where
   inBalancedBraces :: Stream s m Char => Int -> String -> ParserT s st m String
   inBalancedBraces 0 "" = do
@@ -638,9 +696,9 @@ withRaw parser = do
   let (l2,c2) = (sourceLine pos2, sourceColumn pos2)
   let inplines = take ((l2 - l1) + 1) $ lines inp
   let raw = case inplines of
-                []   -> ""
-                [l]  -> take (c2 - c1) l
-                ls   -> unlines (init ls) ++ take (c2 - 1) (last ls)
+                []  -> ""
+                [l] -> take (c2 - c1) l
+                ls  -> unlines (init ls) ++ take (c2 - 1) (last ls)
   return (result, raw)
 
 -- | Parses backslash, then applies character parser.
@@ -656,11 +714,11 @@ characterReference = try $ do
   ent <- many1Till nonspaceChar (char ';')
   let ent' = case ent of
                   '#':'X':xs -> '#':'x':xs  -- workaround tagsoup bug
-                  '#':_  -> ent
-                  _      -> ent ++ ";"
+                  '#':_      -> ent
+                  _          -> ent ++ ";"
   case lookupEntity ent' of
-       Just (c : _)  -> return c
-       _             -> fail "entity not found"
+       Just (c : _) -> return c
+       _            -> fail "entity not found"
 
 -- | Parses an uppercase roman numeral and returns (UpperRoman, number).
 upperRoman :: Stream s m Char => ParserT s st m (ListNumberStyle, Int)
@@ -723,7 +781,7 @@ romanOne = (char 'i' >> return (LowerRoman, 1)) <|>
 
 -- | Parses an ordered list marker and returns list attributes.
 anyOrderedListMarker :: Stream s m Char => ParserT s ParserState m ListAttributes
-anyOrderedListMarker = choice $
+anyOrderedListMarker = choice
   [delimParser numParser | delimParser <- [inPeriod, inOneParen, inTwoParens],
                            numParser <- [decimal, exampleNum, defaultNum, romanOne,
                            lowerAlpha, lowerRoman, upperAlpha, upperRoman]]
@@ -806,7 +864,7 @@ blankLineBlockLine = try (char '|' >> blankline)
 lineBlockLines :: Monad m => ParserT [Char] st m [String]
 lineBlockLines = try $ do
   lines' <- many1 (lineBlockLine <|> ((:[]) <$> blankLineBlockLine))
-  skipMany1 $ blankline <|> blankLineBlockLine
+  skipMany blankline
   return lines'
 
 -- | Parse a table using 'headerParser', 'rowParser',
@@ -837,10 +895,10 @@ tableWith' headerParser rowParser lineParser footerParser = try $ do
     lines' <- sequence <$> rowParser indices `sepEndBy1` lineParser
     footerParser
     numColumns <- getOption readerColumns
-    let widths = if (indices == [])
+    let widths = if null indices
                     then replicate (length aligns) 0.0
                     else widthsFromIndices numColumns indices
-    return $ (aligns, widths, heads, lines')
+    return (aligns, widths, heads, lines')
 
 -- Calculate relative widths of table columns, based on indices
 widthsFromIndices :: Int      -- Number of columns on terminal
@@ -864,7 +922,7 @@ widthsFromIndices numColumns' indices =
       quotient = if totLength > numColumns
                    then fromIntegral totLength
                    else fromIntegral numColumns
-      fracs = map (\l -> (fromIntegral l) / quotient) lengths in
+      fracs = map (\l -> fromIntegral l / quotient) lengths in
   tail fracs
 
 ---
@@ -945,7 +1003,7 @@ gridTableHeader headless blocks = try $ do
                     then replicate (length underDashes) ""
                     else map (unlines . map trim) $ transpose
                        $ map (gridTableSplitLine indices) rawContent
-  heads <- fmap sequence $ mapM (parseFromString blocks . trim) rawHeads
+  heads <- sequence <$> mapM (parseFromString blocks . trim) rawHeads
   return (heads, aligns, indices)
 
 gridTableRawLine :: Stream s m Char => [Int] -> ParserT s st m [String]
@@ -974,7 +1032,7 @@ removeOneLeadingSpace xs =
   if all startsWithSpace xs
      then map (drop 1) xs
      else xs
-   where startsWithSpace ""     = True
+   where startsWithSpace ""    = True
          startsWithSpace (y:_) = y == ' '
 
 -- | Parse footer for a grid table.
@@ -1010,35 +1068,36 @@ testStringWith parser str = UTF8.putStrLn $ show $
 
 -- | Parsing options.
 data ParserState = ParserState
-    { stateOptions         :: ReaderOptions, -- ^ User options
-      stateParserContext   :: ParserContext, -- ^ Inside list?
-      stateQuoteContext    :: QuoteContext,  -- ^ Inside quoted environment?
-      stateAllowLinks      :: Bool,          -- ^ Allow parsing of links
-      stateMaxNestingLevel :: Int,           -- ^ Max # of nested Strong/Emph
-      stateLastStrPos      :: Maybe SourcePos, -- ^ Position after last str parsed
-      stateKeys            :: KeyTable,      -- ^ List of reference keys
-      stateHeaderKeys      :: KeyTable,      -- ^ List of implicit header ref keys
-      stateSubstitutions   :: SubstTable,    -- ^ List of substitution references
-      stateNotes           :: NoteTable,     -- ^ List of notes (raw bodies)
-      stateNotes'          :: NoteTable',    -- ^ List of notes (parsed bodies)
-      stateNoteRefs        :: Set.Set String, -- ^ List of note references used
-      stateMeta            :: Meta,          -- ^ Document metadata
-      stateMeta'           :: F Meta,        -- ^ Document metadata
-      stateCitations       :: M.Map String String, -- ^ RST-style citations
-      stateHeaderTable     :: [HeaderType],  -- ^ Ordered list of header types used
-      stateHeaders         :: M.Map Inlines String, -- ^ List of headers and ids (used for implicit ref links)
-      stateIdentifiers     :: Set.Set String, -- ^ Header identifiers used
-      stateNextExample     :: Int,           -- ^ Number of next example
-      stateExamples        :: M.Map String Int, -- ^ Map from example labels to numbers
-      stateMacros          :: M.Map Text Macro, -- ^ Table of macros defined so far
-      stateRstDefaultRole  :: String,        -- ^ Current rST default interpreted text role
-      stateRstCustomRoles  :: M.Map String (String, Maybe String, Attr), -- ^ Current rST custom text roles
+    { stateOptions           :: ReaderOptions, -- ^ User options
+      stateParserContext     :: ParserContext, -- ^ Inside list?
+      stateQuoteContext      :: QuoteContext,  -- ^ Inside quoted environment?
+      stateAllowLinks        :: Bool,          -- ^ Allow parsing of links
+      stateMaxNestingLevel   :: Int,           -- ^ Max # of nested Strong/Emph
+      stateLastStrPos        :: Maybe SourcePos, -- ^ Position after last str parsed
+      stateKeys              :: KeyTable,      -- ^ List of reference keys
+      stateHeaderKeys        :: KeyTable,      -- ^ List of implicit header ref keys
+      stateSubstitutions     :: SubstTable,    -- ^ List of substitution references
+      stateNotes             :: NoteTable,     -- ^ List of notes (raw bodies)
+      stateNotes'            :: NoteTable',    -- ^ List of notes (parsed bodies)
+      stateNoteRefs          :: Set.Set String, -- ^ List of note references used
+      stateMeta              :: Meta,          -- ^ Document metadata
+      stateMeta'             :: F Meta,        -- ^ Document metadata
+      stateCitations         :: M.Map String String, -- ^ RST-style citations
+      stateHeaderTable       :: [HeaderType],  -- ^ Ordered list of header types used
+      stateHeaders           :: M.Map Inlines String, -- ^ List of headers and ids (used for implicit ref links)
+      stateIdentifiers       :: Set.Set String, -- ^ Header identifiers used
+      stateNextExample       :: Int,           -- ^ Number of next example
+      stateExamples          :: M.Map String Int, -- ^ Map from example labels to numbers
+      stateMacros            :: M.Map Text Macro, -- ^ Table of macros defined so far
+      stateRstDefaultRole    :: String,        -- ^ Current rST default interpreted text role
+      stateRstCustomRoles    :: M.Map String (String, Maybe String, Attr), -- ^ Current rST custom text roles
       -- Triple represents: 1) Base role, 2) Optional format (only for :raw:
       -- roles), 3) Additional classes (rest of Attr is unused)).
-      stateCaption         :: Maybe Inlines, -- ^ Caption in current environment
-      stateInHtmlBlock     :: Maybe String,  -- ^ Tag type of HTML block being parsed
-      stateContainers      :: [String],      -- ^ parent include files
-      stateLogMessages     :: [LogMessage],  -- ^ log messages
+      stateCaption           :: Maybe Inlines, -- ^ Caption in current environment
+      stateInHtmlBlock       :: Maybe String,  -- ^ Tag type of HTML block being parsed
+      stateFencedDivLevel    :: Int,           -- ^ Depth of fenced div
+      stateContainers        :: [String],      -- ^ parent include files
+      stateLogMessages       :: [LogMessage],  -- ^ log messages
       stateMarkdownAttribute :: Bool         -- ^ True if in markdown=1 context
     }
 
@@ -1153,6 +1212,7 @@ defaultParserState =
                   stateRstCustomRoles  = M.empty,
                   stateCaption         = Nothing,
                   stateInHtmlBlock     = Nothing,
+                  stateFencedDivLevel  = 0,
                   stateContainers      = [],
                   stateLogMessages     = [],
                   stateMarkdownAttribute = False
@@ -1238,7 +1298,7 @@ registerHeader (ident,classes,kvs) header' = do
      then do
        let id' = uniqueIdent (B.toList header') ids
        let id'' = if Ext_ascii_identifiers `extensionEnabled` exts
-                     then catMaybes $ map toAsciiChar id'
+                     then mapMaybe toAsciiChar id'
                      else id'
        updateState $ updateIdentifierList $ Set.insert id'
        updateState $ updateIdentifierList $ Set.insert id''
@@ -1289,9 +1349,7 @@ failIfInQuoteContext :: (HasQuoteContext st m, Stream s m t)
                      -> ParserT s st m ()
 failIfInQuoteContext context = do
   context' <- getQuoteContext
-  if context' == context
-     then fail "already inside quotes"
-     else return ()
+  when (context' == context) $ fail "already inside quotes"
 
 charOrRef :: Stream s m Char => String -> ParserT s st m Char
 charOrRef cs =
@@ -1384,10 +1442,8 @@ a <+?> b = a >>= flip fmap (try b <|> return mempty) . (<>)
 extractIdClass :: Attr -> Attr
 extractIdClass (ident, cls, kvs) = (ident', cls', kvs')
   where
-    ident' = case (lookup "id" kvs) of
-               Just v  -> v
-               Nothing -> ident
-    cls'   = case (lookup "class" kvs) of
+    ident' = fromMaybe ident (lookup "id" kvs)
+    cls'   = case lookup "class" kvs of
                Just cl -> words cl
                Nothing -> cls
     kvs'  = filter (\(k,_) -> k /= "id" || k /= "class") kvs

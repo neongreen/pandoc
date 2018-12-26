@@ -1,18 +1,19 @@
 module Tests.Readers.Docx (tests) where
 
 import Codec.Archive.Zip
-import qualified Data.ByteString.Lazy as B
 import qualified Data.ByteString as BS
-import qualified Data.Text as T
+import qualified Data.ByteString.Lazy as B
 import qualified Data.Map as M
+import qualified Data.Text as T
+import Data.Maybe
+import System.IO.Unsafe
 import Test.Tasty
 import Test.Tasty.HUnit
 import Tests.Helpers
 import Text.Pandoc
-import Text.Pandoc.UTF8 as UTF8
 import qualified Text.Pandoc.Class as P
 import Text.Pandoc.MediaBag (MediaBag, lookupMedia, mediaDirectory)
-import System.IO.Unsafe -- TODO temporary
+import Text.Pandoc.UTF8 as UTF8
 
 -- We define a wrapper around pandoc that doesn't normalize in the
 -- tests. Since we do our own normalization, we want to make sure
@@ -46,7 +47,7 @@ compareOutput opts docxFile nativeFile = do
   nf <- UTF8.toText <$> BS.readFile nativeFile
   p <- runIOorExplode $ readDocx opts df
   df' <- runIOorExplode $ readNative def nf
-  return $ (noNorm p, noNorm df')
+  return (noNorm p, noNorm df')
 
 testCompareWithOptsIO :: ReaderOptions -> String -> FilePath -> FilePath -> IO TestTree
 testCompareWithOptsIO opts name docxFile nativeFile = do
@@ -87,11 +88,9 @@ compareMediaPathIO mediaPath mediaBag docxPath = do
                  Nothing      -> error ("couldn't find " ++
                                         mediaPath ++
                                         " in media bag")
-      docxBS = case docxMedia of
-                 Just bs -> bs
-                 Nothing -> error ("couldn't find " ++
-                                   mediaPath ++
-                                   " in media bag")
+      docxBS = fromMaybe (error ("couldn't find " ++
+                        mediaPath ++
+                        " in media bag")) docxMedia
   return $ mbBS == docxBS
 
 compareMediaBagIO :: FilePath -> IO Bool
@@ -128,9 +127,9 @@ tests = [ testGroup "inlines"
             "docx/links.docx"
             "docx/links.native"
           , testCompare
-            "normalizing adjacent hyperlinks"
-            "docx/adjacent_links.docx"
-            "docx/adjacent_links.native"
+            "hyperlinks in <w:instrText> tag"
+            "docx/instrText_hyperlink.docx"
+            "docx/instrText_hyperlink.native"
           , testCompare
             "inline image"
             "docx/image.docx"
@@ -175,6 +174,18 @@ tests = [ testGroup "inlines"
             "inline code in subscript and superscript"
             "docx/verbatim_subsuper.docx"
             "docx/verbatim_subsuper.native"
+          , testCompare
+            "inlines inside of Structured Document Tags"
+            "docx/sdt_elements.docx"
+            "docx/sdt_elements.native"
+          , testCompare
+            "remove anchor spans with nothing pointing to them"
+            "docx/unused_anchors.docx"
+            "docx/unused_anchors.native"
+          , testCompare
+            "collapse overlapping targets (anchor spans)"
+            "docx/overlapping_targets.docx"
+            "docx/overlapping_targets.native"
           ]
         , testGroup "blocks"
           [ testCompare
@@ -185,6 +196,10 @@ tests = [ testGroup "inlines"
             "headers already having auto identifiers"
             "docx/already_auto_ident.docx"
             "docx/already_auto_ident.native"
+          , testCompare
+            "avoid zero-level headers"
+            "docx/0_level_headers.docx"
+            "docx/0_level_headers.native"
           , testCompare
             "nested anchor spans in header"
             "docx/nested_anchors_in_header.docx"
@@ -205,6 +220,14 @@ tests = [ testGroup "inlines"
             "lists"
             "docx/lists.docx"
             "docx/lists.native"
+          , testCompare
+            "lists continuing after interruption"
+            "docx/lists_continuing.docx"
+            "docx/lists_continuing.native"
+          , testCompare
+            "lists restarting after interruption"
+            "docx/lists_restarting.docx"
+            "docx/lists_restarting.native"
           , testCompare
             "definition lists"
             "docx/definition_list.docx"
@@ -249,6 +272,10 @@ tests = [ testGroup "inlines"
             "tables with one row"
             "docx/table_one_row.docx"
             "docx/table_one_row.native"
+          , testCompare
+            "tables with variable width"
+            "docx/table_variable_width.docx"
+            "docx/table_variable_width.native"
           , testCompare
             "code block"
             "docx/codeblock.docx"
@@ -315,6 +342,18 @@ tests = [ testGroup "inlines"
             "comments (all comments)"
             "docx/comments.docx"
             "docx/comments.native"
+          , testCompareWithOpts def{readerTrackChanges=AcceptChanges}
+            "paragraph insertion/deletion (accept)"
+            "docx/paragraph_insertion_deletion.docx"
+            "docx/paragraph_insertion_deletion_accept.native"
+          , testCompareWithOpts def{readerTrackChanges=RejectChanges}
+            "paragraph insertion/deletion (reject)"
+            "docx/paragraph_insertion_deletion.docx"
+            "docx/paragraph_insertion_deletion_reject.native"
+          , testCompareWithOpts def{readerTrackChanges=AllChanges}
+            "paragraph insertion/deletion (all)"
+            "docx/paragraph_insertion_deletion.docx"
+            "docx/paragraph_insertion_deletion_all.native"
           , testForWarningsWithOpts def{readerTrackChanges=AcceptChanges}
             "comment warnings (accept -- no warnings)"
             "docx/comments_warning.docx"
@@ -332,6 +371,17 @@ tests = [ testGroup "inlines"
           [ testMediaBag
             "image extraction"
             "docx/image.docx"
+          ]
+        , testGroup "custom styles"
+          [ testCompare
+            "custom styles (`+styles`) not enabled (default)"
+            "docx/custom-style-reference.docx"
+            "docx/custom-style-no-styles.native"
+          , testCompareWithOpts
+            def{readerExtensions=extensionsFromList [Ext_styles]}
+            "custom styles (`+styles`) enabled"
+            "docx/custom-style-reference.docx"
+            "docx/custom-style-with-styles.native"
           ]
         , testGroup "metadata"
           [ testCompareWithOpts def{readerStandalone=True}

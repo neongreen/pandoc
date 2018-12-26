@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2010-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2010-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Textile
-   Copyright   : Copyright (C) 2010-2017 John MacFarlane
+   Copyright   : Copyright (C) 2010-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -35,9 +35,9 @@ import Data.Char (isSpace)
 import Data.List (intercalate)
 import Data.Text (Text, pack)
 import Text.Pandoc.Class (PandocMonad, report)
-import Text.Pandoc.Logging
 import Text.Pandoc.Definition
 import Text.Pandoc.ImageSize
+import Text.Pandoc.Logging
 import Text.Pandoc.Options
 import Text.Pandoc.Pretty (render)
 import Text.Pandoc.Shared
@@ -297,7 +297,7 @@ definitionListItemToTextile opts (label, items) = do
   labelText <- inlineListToTextile opts label
   contents <- mapM (blockListToTextile opts) items
   return $ "<dt>" ++ labelText ++ "</dt>\n" ++
-          (intercalate "\n" $ map (\d -> "<dd>" ++ d ++ "</dd>") contents)
+          intercalate "\n" (map (\d -> "<dd>" ++ d ++ "</dd>") contents)
 
 -- | True if the list can be handled by simple wiki markup, False if HTML tags will be needed.
 isSimpleList :: Block -> Bool
@@ -350,7 +350,7 @@ tableRowToTextile opts alignStrings rownum cols' = do
                       0 -> "header"
                       x | x `rem` 2 == 1 -> "odd"
                       _ -> "even"
-  cols'' <- sequence $ zipWith
+  cols'' <- zipWithM
             (\alignment item -> tableItemToTextile opts celltype alignment item)
             alignStrings cols'
   return $ "<tr class=\"" ++ rowclass ++ "\">\n" ++ unlines cols'' ++ "</tr>"
@@ -483,7 +483,7 @@ inlineToTextile opts (Image attr@(_, cls, _) alt (source, tit)) = do
                    then ""
                    else "(" ++ unwords cls ++ ")"
       showDim dir = let toCss str = Just $ show dir ++ ":" ++ str ++ ";"
-                    in case (dimension dir attr) of
+                    in case dimension dir attr of
                          Just (Percent a) -> toCss $ show (Percent a)
                          Just dim         -> toCss $ showInPixel opts dim ++ "px"
                          Nothing          -> Nothing

@@ -14,7 +14,9 @@ $endif$
   <title>$if(title-prefix)$$title-prefix$ – $endif$$pagetitle$</title>
   <style type="text/css">
       code{white-space: pre-wrap;}
-      .smallcaps{font-variant: small-caps;}
+      span.smallcaps{font-variant: small-caps;}
+      span.underline{text-decoration: underline;}
+      div.column{display: inline-block; vertical-align: top; width: 50%;}
 $if(quotes)$
       q { quotes: "“" "”" "‘" "’"; }
 $endif$
@@ -29,7 +31,7 @@ $for(css)$
   <link rel="stylesheet" href="$css$">
 $endfor$
 $else$
-<link href='http://fonts.googleapis.com/css?family=Oswald' rel='stylesheet'>
+<link href='https://fonts.googleapis.com/css?family=Oswald' rel='stylesheet'>
 
 <style>
   html, .view body { background-color: black; counter-reset: slideidx; }

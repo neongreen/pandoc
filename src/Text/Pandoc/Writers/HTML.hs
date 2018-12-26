@@ -2,8 +2,9 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns        #-}
+{-# LANGUAGE MultiWayIf          #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +23,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.HTML
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -41,20 +42,26 @@ module Text.Pandoc.Writers.HTML (
   writeSlidy,
   writeSlideous,
   writeDZSlides,
-  writeRevealJs
+  writeRevealJs,
+  tagWithAttributes
   ) where
 import Control.Monad.State.Strict
 import Data.Char (ord, toLower)
-import Data.Text (Text)
-import qualified Data.Text.Lazy as TL
-import Data.List (intersperse, isPrefixOf)
+import Data.List (intercalate, intersperse, isPrefixOf, partition)
 import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
 import Data.Monoid ((<>))
 import qualified Data.Set as Set
 import Data.String (fromString)
+import Data.Text (Text)
+import qualified Data.Text.Lazy as TL
 import Network.HTTP (urlEncode)
 import Network.URI (URI (..), parseURIReference, unEscapeString)
 import Numeric (showHex)
+import Text.Blaze.Internal (customLeaf, MarkupM(Empty))
+#if MIN_VERSION_blaze_markup(0,6,3)
+#else
+import Text.Blaze.Internal (preEscapedString, preEscapedText)
+#endif
 import Text.Blaze.Html hiding (contents)
 import Text.Pandoc.Definition
 import Text.Pandoc.Highlighting (formatHtmlBlock, formatHtmlInline, highlight,
@@ -79,11 +86,11 @@ import qualified Text.Blaze.Html5 as H5
 #endif
 import Control.Monad.Except (throwError)
 import Data.Aeson (Value)
-import System.FilePath (takeExtension, takeBaseName)
+import System.FilePath (takeBaseName, takeExtension)
 import Text.Blaze.Html.Renderer.Text (renderHtml)
 import qualified Text.Blaze.XHtml1.Transitional as H
 import qualified Text.Blaze.XHtml1.Transitional.Attributes as A
-import Text.Pandoc.Class (PandocMonad, report)
+import Text.Pandoc.Class (PandocMonad, report, runPure)
 import Text.Pandoc.Error
 import Text.Pandoc.Logging
 import Text.TeXMath
@@ -101,6 +108,7 @@ data WriterState = WriterState
     , stHtml5        :: Bool    -- ^ Use HTML5
     , stEPUBVersion  :: Maybe EPUBVersion -- ^ EPUB version if for epub
     , stSlideVariant :: HTMLSlideVariant
+    , stCodeBlockNum :: Int     -- ^ Number of code block
     }
 
 defaultWriterState :: WriterState
@@ -108,7 +116,8 @@ defaultWriterState = WriterState {stNotes= [], stMath = False, stQuotes = False,
                                   stHighlighting = False, stSecNum = [],
                                   stElement = False, stHtml5 = False,
                                   stEPUBVersion = Nothing,
-                                  stSlideVariant = NoSlides}
+                                  stSlideVariant = NoSlides,
+                                  stCodeBlockNum = 0}
 
 -- Helpers to render HTML with the appropriate function.
 
@@ -215,7 +224,7 @@ writeHtmlString' st opts d = do
                     defField "body" (renderHtml' body) context'
 
 writeHtml' :: PandocMonad m => WriterState -> WriterOptions -> Pandoc -> m Html
-writeHtml' st opts d = do
+writeHtml' st opts d =
   case writerTemplate opts of
        Just _ -> preEscapedText <$> writeHtmlString' st opts d
        Nothing  -> do
@@ -268,10 +277,18 @@ pandocToHtml opts (Pandoc meta blocks) = do
                          H.script ! A.src (toValue url)
                                   ! A.type_ "text/javascript"
                                   $ mempty
-                      KaTeX js css ->
-                         (H.script ! A.src (toValue js) $ mempty) <>
-                         (H.link ! A.rel "stylesheet" ! A.href (toValue css)) <>
-                         (H.script ! A.type_ "text/javascript" $ toHtml renderKaTeX)
+                      KaTeX url ->
+                         (H.script !
+                           A.src (toValue $ url ++ "katex.min.js") $ mempty) <>
+                         (H.script !
+                           A.src (toValue $ url ++ "contrib/auto-render.min.js")
+                             $ mempty) <>
+                         (
+                                  H.script
+                            "document.addEventListener(\"DOMContentLoaded\", function() {\n  renderMathInElement(document.body);\n});") <>
+                         (H.link ! A.rel "stylesheet" !
+                           A.href (toValue $ url ++ "katex.min.css"))
+
                       _ -> case lookup "mathml-script" (writerVariables opts) of
                                  Just s | not (stHtml5 st) ->
                                    H.script ! A.type_ "text/javascript"
@@ -304,11 +321,11 @@ pandocToHtml opts (Pandoc meta blocks) = do
                   defField "idprefix" (writerIdentifierPrefix opts) $
                   -- these should maybe be set in pandoc.hs
                   defField "slidy-url"
-                    ("http://www.w3.org/Talks/Tools/Slidy2" :: String) $
+                    ("https://www.w3.org/Talks/Tools/Slidy2" :: String) $
                   defField "slideous-url" ("slideous" :: String) $
                   defField "revealjs-url" ("reveal.js" :: String) $
                   defField "s5-url" ("s5/default" :: String) $
-                  defField "html5" (stHtml5 st) $
+                  defField "html5" (stHtml5 st)
                   metadata
   return (thebody, context)
 
@@ -327,9 +344,9 @@ toList :: PandocMonad m
 toList listop opts items = do
     slideVariant <- gets stSlideVariant
     return $
-      if (writerIncremental opts)
-         then if (slideVariant /= RevealJsSlides)
-                 then (listop $ mconcat items) ! A.class_ "incremental"
+      if writerIncremental opts
+         then if slideVariant /= RevealJsSlides
+                 then  listop (mconcat items) ! A.class_ "incremental"
                  else listop $ mconcat $ map (! A.class_ "fragment") items
          else listop $ mconcat items
 
@@ -357,7 +374,7 @@ tableOfContents opts sects = do
 
 -- | Convert section number to string
 showSecNum :: [Int] -> String
-showSecNum = concat . intersperse "." . map show
+showSecNum = intercalate "." . map show
 
 -- | Converts an Element to a list item for a table of contents,
 -- retrieving the appropriate identifier from state.
@@ -383,7 +400,7 @@ elementToListItem opts (Sec lev num (id',classes,_) headerText subsecs)
   let revealSlash = ['/' | slideVariant== RevealJsSlides]
   return $ Just
          $ if null id'
-              then (H.a $ toHtml txt) >> subList
+              then  H.a (toHtml txt) >> subList
               else (H.a ! A.href (toValue $ "#" ++ revealSlash ++
                     writerIdentifierPrefix opts ++ id')
                        $ toHtml txt) >> subList
@@ -403,13 +420,17 @@ elementToHtml slideLevel opts (Sec level num (id',classes,keyvals) title' elemen
                 then return mempty
                 else do
                   modify (\st -> st{ stElement = True})
+                  let level' = if level <= slideLevel &&
+                                  slideVariant == SlidySlides
+                                  then 1 -- see #3566
+                                  else level
                   res <- blockToHtml opts
-                           (Header level (id',classes,keyvals) title')
+                           (Header level' (id',classes,keyvals) title')
                   modify (\st -> st{ stElement = False})
                   return res
 
-  let isSec (Sec _ _ _ _ _) = True
-      isSec (Blk _)         = False
+  let isSec Sec{} = True
+      isSec (Blk _) = False
   let isPause (Blk x) = x == Para [Str ".",Space,Str ".",Space,Str "."]
       isPause _       = False
   let fragmentClass = case slideVariant of
@@ -426,7 +447,7 @@ elementToHtml slideLevel opts (Sec level num (id',classes,keyvals) title' elemen
                                   []     -> []
                                   (x:xs) -> x ++ concatMap inDiv xs
   let inNl x = mconcat $ nl opts : intersperse (nl opts) x ++ [nl opts]
-  let classes' = ["titleslide" | titleSlide] ++ ["slide" | slide] ++
+  let classes' = ["title-slide" | titleSlide] ++ ["slide" | slide] ++
                   ["section" | (slide || writerSectionDivs opts) &&
                                not html5 ] ++
                   ["level" ++ show level | slide || writerSectionDivs opts ]
@@ -437,7 +458,8 @@ elementToHtml slideLevel opts (Sec level num (id',classes,keyvals) title' elemen
   let attr = (id',classes',keyvals)
   if titleSlide
      then do
-       t <- addAttrs opts attr $ secttag $ header'
+       t <- addAttrs opts attr $
+                   secttag header'
        return $
          (if slideVariant == RevealJsSlides
                 then H5.section
@@ -457,21 +479,19 @@ footnoteSection opts notes = do
   html5 <- gets stHtml5
   slideVariant <- gets stSlideVariant
   let hrtag = if html5 then H5.hr else H.hr
-  let container x = if html5
-                       then H5.section ! A.class_ "footnotes" $ x
-                       else if slideVariant /= NoSlides
-                            then H.div ! A.class_ "footnotes slide" $ x
-                            else H.div ! A.class_ "footnotes" $ x
+  let container x
+        | html5 = H5.section ! A.class_ "footnotes" $ x
+        | slideVariant /= NoSlides = H.div ! A.class_ "footnotes slide" $ x
+        | otherwise = H.div ! A.class_ "footnotes" $ x
   return $
     if null notes
        then mempty
-       else nl opts >> (container
-            $ nl opts >> hrtag >> nl opts >>
+       else nl opts >> container (nl opts >> hrtag >> nl opts >>
               H.ol (mconcat notes >> nl opts) >> nl opts)
 
 -- | Parse a mailto link; return Just (name, domain) or Nothing.
 parseMailto :: String -> Maybe (String, String)
-parseMailto s = do
+parseMailto s =
   case break (==':') s of
        (xs,':':addr) | map toLower xs == "mailto" -> do
          let (name', rest) = span (/='@') addr
@@ -503,8 +523,8 @@ obfuscateLink opts attr (TL.unpack . renderHtml -> txt) s =
                 ReferenceObfuscation ->
                      -- need to use preEscapedString or &'s are escaped to &amp; in URL
                      return $
-                     preEscapedString $ "<a href=\"" ++ (obfuscateString s')
-                     ++ "\" class=\"email\">" ++ (obfuscateString txt) ++ "</a>"
+                     preEscapedString $ "<a href=\"" ++ obfuscateString s'
+                     ++ "\" class=\"email\">" ++ obfuscateString txt ++ "</a>"
                 JavascriptObfuscation ->
                      return $
                      (H.script ! A.type_ "text/javascript" $
@@ -529,6 +549,21 @@ obfuscateChar char =
 obfuscateString :: String -> String
 obfuscateString = concatMap obfuscateChar . fromEntities
 
+-- | Create HTML tag with attributes.
+tagWithAttributes :: WriterOptions
+                  -> Bool -- ^ True for HTML5
+                  -> Bool -- ^ True if self-closing tag
+                  -> Text -- ^ Tag text
+                  -> Attr -- ^ Pandoc style tag attributes
+                  -> Text
+tagWithAttributes opts html5 selfClosing tagname attr =
+  let mktag = (TL.toStrict . renderHtml <$> evalStateT
+               (addAttrs opts attr (customLeaf (textTag tagname) selfClosing))
+               defaultWriterState{ stHtml5 = html5 })
+  in  case runPure mktag of
+           Left _  -> mempty
+           Right t -> t
+
 addAttrs :: PandocMonad m
          => WriterOptions -> Attr -> Html -> StateT WriterState m Html
 addAttrs opts attr h = foldl (!) h <$> attrsToHtml opts attr
@@ -540,6 +575,7 @@ toAttrs kvs = do
   return $ map (\(x,y) ->
      customAttribute
         (fromString (if not html5 || x `Set.member` html5Attributes
+                                  || "data-" `isPrefixOf` x
                         then x
                         else "data-" ++ x)) (toValue y)) kvs
 
@@ -565,12 +601,19 @@ imgAttrsToHtml opts attr = do
     isNotDim _             = True
 
 dimensionsToAttrList :: Attr -> [(String, String)]
-dimensionsToAttrList attr = (go Width) ++ (go Height)
+dimensionsToAttrList attr = consolidateStyles $ go Width ++ go Height
   where
-    go dir = case (dimension dir attr) of
-               (Just (Pixel a))  -> [(show dir, show a)]
-               (Just x)          -> [("style", show dir ++ ":" ++ show x)]
-               Nothing           -> []
+    consolidateStyles :: [(String, String)] -> [(String, String)]
+    consolidateStyles xs =
+      case partition isStyle xs of
+           ([], _)    -> xs
+           (ss, rest) -> ("style", intercalate ";" $ map snd ss) : rest
+    isStyle ("style", _) = True
+    isStyle _            = False
+    go dir = case dimension dir attr of
+               (Just (Pixel a)) -> [(show dir, show a)]
+               (Just x)         -> [("style", show dir ++ ":" ++ show x)]
+               Nothing          -> []
 
 imageExts :: [String]
 imageExts = [ "art", "bmp", "cdr", "cdt", "cpt", "cr2", "crw", "djvu", "erf",
@@ -580,9 +623,7 @@ imageExts = [ "art", "bmp", "cdr", "cdt", "cpt", "cr2", "crw", "djvu", "erf",
 
 treatAsImage :: FilePath -> Bool
 treatAsImage fp =
-  let path = case uriPath `fmap` parseURIReference fp of
-                  Nothing -> fp
-                  Just up -> up
+  let path = maybe fp uriPath (parseURIReference fp)
       ext  = map toLower $ drop 1 $ takeExtension path
   in  null ext || ext `elem` imageExts
 
@@ -622,6 +663,7 @@ blockToHtml opts (Para [Image attr txt (s,'f':'i':'g':':':tit)]) =
   figure opts attr txt (s,tit)
 blockToHtml opts (Para lst)
   | isEmptyRaw lst = return mempty
+  | null lst && not (isEnabled Ext_empty_paragraphs opts) = return mempty
   | otherwise = do
       contents <- inlineListToHtml opts lst
       return $ H.p contents
@@ -633,29 +675,48 @@ blockToHtml opts (LineBlock lns) =
   if writerWrapText opts == WrapNone
   then blockToHtml opts $ linesToPara lns
   else do
-    let lf = preEscapedString "\n"
-    htmlLines <- mconcat . intersperse lf <$> mapM (inlineListToHtml opts) lns
+    htmlLines <- inlineListToHtml opts $ intercalate [LineBreak] lns
     return $ H.div ! A.class_ "line-block" $ htmlLines
-blockToHtml opts (Div attr@(ident, classes, kvs) bs) = do
+blockToHtml opts (Div attr@(ident, classes, kvs') bs) = do
   html5 <- gets stHtml5
+  slideVariant <- gets stSlideVariant
+  let kvs = [(k,v) | (k,v) <- kvs', k /= "width"] ++
+            [("style", "width:" ++ w ++ ";")
+             | ("width",w) <- kvs', "column" `elem` classes]
   let speakerNotes = "notes" `elem` classes
   -- we don't want incremental output inside speaker notes, see #1394
-  let opts' = if speakerNotes then opts{ writerIncremental = False } else opts
-  contents <- blockListToHtml opts' bs
+  let opts' = if | speakerNotes -> opts{ writerIncremental = False }
+                 | "incremental" `elem` classes -> opts{ writerIncremental = True }
+                 | "nonincremental" `elem` classes -> opts{ writerIncremental = False }
+                 | otherwise -> opts
+      -- we remove "incremental" and "nonincremental" if we're in a
+      -- slide presentaiton format.
+      classes' = case slideVariant of
+        NoSlides -> classes
+        _ -> filter (\k -> k /= "incremental" && k /= "nonincremental") classes
+  contents <- if "columns" `elem` classes'
+                 then -- we don't use blockListToHtml because it inserts
+                      -- a newline between the column divs, which throws
+                      -- off widths! see #4028
+                      mconcat <$> mapM (blockToHtml opts) bs
+                 else blockListToHtml opts' bs
   let contents' = nl opts >> contents >> nl opts
-  let (divtag, classes') = if html5 && "section" `elem` classes
-                              then (H5.section, filter (/= "section") classes)
-                              else (H.div, classes)
-  slideVariant <- gets stSlideVariant
+  let (divtag, classes'') = if html5 && "section" `elem` classes'
+                            then (H5.section, filter (/= "section") classes')
+                            else (H.div, classes')
   if speakerNotes
      then case slideVariant of
-               RevealJsSlides -> addAttrs opts' attr $ H5.aside $ contents'
+               RevealJsSlides -> addAttrs opts' attr $
+                           H5.aside contents'
                DZSlides       -> do
-                 t <- addAttrs opts' attr $ H5.div $ contents'
-                 return $ t ! (H5.customAttribute "role" "note")
-               NoSlides       -> addAttrs opts' attr $ H.div $ contents'
+                 t <- addAttrs opts' attr $
+                             H5.div contents'
+                 return $ t ! H5.customAttribute "role" "note"
+               NoSlides       -> addAttrs opts' attr $
+                           H.div contents'
                _              -> return mempty
-     else addAttrs opts (ident, classes', kvs) $ divtag $ contents'
+     else addAttrs opts (ident, classes'', kvs) $
+              divtag contents'
 blockToHtml opts (RawBlock f str) = do
   ishtml <- isRawHtml f
   if ishtml
@@ -667,10 +728,16 @@ blockToHtml opts (RawBlock f str) = do
              else do
                report $ BlockNotRendered (RawBlock f str)
                return mempty
-blockToHtml _ (HorizontalRule) = do
+blockToHtml _ HorizontalRule = do
   html5 <- gets stHtml5
   return $ if html5 then H5.hr else H.hr
 blockToHtml opts (CodeBlock (id',classes,keyvals) rawCode) = do
+  id'' <- if null id'
+             then do
+               modify $ \st -> st{ stCodeBlockNum = stCodeBlockNum st + 1 }
+               codeblocknum <- gets stCodeBlockNum
+               return ("cb" ++ show codeblocknum)
+             else return id'
   let tolhs = isEnabled Ext_literate_haskell opts &&
                 any (\c -> map toLower c == "haskell") classes &&
                 any (\c -> map toLower c == "literate") classes
@@ -684,7 +751,7 @@ blockToHtml opts (CodeBlock (id',classes,keyvals) rawCode) = do
                     else rawCode
       hlCode   = if isJust (writerHighlightStyle opts)
                     then highlight (writerSyntaxMap opts) formatHtmlBlock
-                            (id',classes',keyvals) adjCode
+                            (id'',classes',keyvals) adjCode
                     else Left ""
   case hlCode of
          Left msg -> do
@@ -693,7 +760,7 @@ blockToHtml opts (CodeBlock (id',classes,keyvals) rawCode) = do
            addAttrs opts (id',classes,keyvals)
              $ H.pre $ H.code $ toHtml adjCode
          Right h -> modify (\st -> st{ stHighlighting = True }) >>
-                    addAttrs opts (id',[],keyvals) h
+                    addAttrs opts (id'',[],keyvals) h
 blockToHtml opts (BlockQuote blocks) = do
   -- in S5, treat list in blockquote specially
   -- if default is incremental, make it nonincremental;
@@ -743,12 +810,8 @@ blockToHtml opts (OrderedList (startnum, numstyle, _) lst) = do
   let numstyle' = case numstyle of
                        Example -> "decimal"
                        _       -> camelCaseToHyphenated $ show numstyle
-  let attribs = (if startnum /= 1
-                   then [A.start $ toValue startnum]
-                   else []) ++
-                (if numstyle == Example
-                    then [A.class_ "example"]
-                    else []) ++
+  let attribs = [A.start $ toValue startnum | startnum /= 1] ++
+                [A.class_ "example" | numstyle == Example] ++
                 (if numstyle /= DefaultStyle
                    then if html5
                            then [A.type_ $
@@ -769,7 +832,7 @@ blockToHtml opts (DefinitionList lst) = do
                   do term' <- if null term
                                  then return mempty
                                  else liftM H.dt $ inlineListToHtml opts term
-                     defs' <- mapM ((liftM (\x -> H.dd $ (x >> nl opts))) .
+                     defs' <- mapM (liftM (\x -> H.dd (x >> nl opts)) .
                                     blockListToHtml opts) defs
                      return $ mconcat $ nl opts : term' : nl opts :
                                         intersperse (nl opts) defs') lst
@@ -823,7 +886,7 @@ tableRowToHtml opts aligns rownum cols' = do
                       0 -> "header"
                       x | x `rem` 2 == 1 -> "odd"
                       _ -> "even"
-  cols'' <- sequence $ zipWith
+  cols'' <- zipWithM
             (\alignment item -> tableItemToHtml opts mkcell alignment item)
             aligns cols'
   return $ (H.tr ! A.class_ rowclass $ nl opts >> mconcat cols'')
@@ -852,7 +915,7 @@ tableItemToHtml opts tag' align' item = do
   let tag'' = if null alignStr
                  then tag'
                  else tag' ! attribs
-  return $ (tag'' $ contents) >> nl opts
+  return $ tag'' contents >> nl opts
 
 toListItems :: WriterOptions -> [Html] -> [Html]
 toListItems opts items = map (toListItem opts) items ++ [nl opts]
@@ -860,9 +923,13 @@ toListItems opts items = map (toListItem opts) items ++ [nl opts]
 toListItem :: WriterOptions -> Html -> Html
 toListItem opts item = nl opts >> H.li item
 
-blockListToHtml :: PandocMonad m => WriterOptions -> [Block] -> StateT WriterState m Html
+blockListToHtml :: PandocMonad m
+                => WriterOptions -> [Block] -> StateT WriterState m Html
 blockListToHtml opts lst =
-  fmap (mconcat . intersperse (nl opts)) $ mapM (blockToHtml opts) lst
+  (mconcat . intersperse (nl opts) . filter nonempty)
+    <$> mapM (blockToHtml opts) lst
+  where nonempty (Empty _) = False
+        nonempty _         = True
 
 -- | Convert list of Pandoc inline elements to HTML.
 inlineListToHtml :: PandocMonad m => WriterOptions -> [Inline] -> StateT WriterState m Html
@@ -890,12 +957,12 @@ inlineToHtml opts inline = do
   html5 <- gets stHtml5
   case inline of
     (Str str)        -> return $ strToHtml str
-    (Space)          -> return $ strToHtml " "
-    (SoftBreak)      -> return $ case writerWrapText opts of
-                                       WrapNone     -> preEscapedString " "
-                                       WrapAuto     -> preEscapedString " "
-                                       WrapPreserve -> preEscapedString "\n"
-    (LineBreak)      -> return $ (if html5 then H5.br else H.br)
+    Space          -> return $ strToHtml " "
+    SoftBreak      -> return $ case writerWrapText opts of
+                                     WrapNone     -> preEscapedString " "
+                                     WrapAuto     -> preEscapedString " "
+                                     WrapPreserve -> preEscapedString "\n"
+    LineBreak      -> return $ (if html5 then H5.br else H.br)
                                  <> strToHtml "\n"
     (Span (id',classes,kvs) ils)
                      -> inlineListToHtml opts ils >>=
@@ -906,7 +973,7 @@ inlineToHtml opts inline = do
                                               "csl-no-smallcaps"]) classes
                               kvs' = if null styles
                                         then kvs
-                                        else (("style", concat styles) : kvs)
+                                        else ("style", concat styles) : kvs
                               styles = ["font-style:normal;"
                                          | "csl-no-emph" `elem` classes]
                                     ++ ["font-weight:normal;"
@@ -992,10 +1059,10 @@ inlineToHtml opts inline = do
               case t of
                 InlineMath  -> "\\(" ++ str ++ "\\)"
                 DisplayMath -> "\\[" ++ str ++ "\\]"
-           KaTeX _ _ -> return $ H.span ! A.class_ mathClass $
-              toHtml (case t of
-                        InlineMath  -> str
-                        DisplayMath -> "\\displaystyle " ++ str)
+           KaTeX _ -> return $ H.span ! A.class_ mathClass $ toHtml $
+              case t of
+                InlineMath  -> "\\(" ++ str ++ "\\)"
+                DisplayMath -> "\\[" ++ str ++ "\\]"
            PlainMath -> do
               x <- lift (texMathToInlines t str) >>= inlineListToHtml opts
               let m = H.span ! A.class_ mathClass $ x
@@ -1065,18 +1132,18 @@ inlineToHtml opts inline = do
                         -- note:  null title included, as in Markdown.pl
     (Note contents) -> do
                         notes <- gets stNotes
-                        let number = (length notes) + 1
+                        let number = length notes + 1
                         let ref = show number
                         htmlContents <- blockListToNote opts ref contents
                         epubVersion <- gets stEPUBVersion
                         -- push contents onto front of notes
-                        modify $ \st -> st {stNotes = (htmlContents:notes)}
+                        modify $ \st -> st {stNotes = htmlContents:notes}
                         slideVariant <- gets stSlideVariant
                         let revealSlash = ['/' | slideVariant == RevealJsSlides]
                         let link = H.a ! A.href (toValue $ "#" ++
                                          revealSlash ++
                                          writerIdentifierPrefix opts ++ "fn" ++ ref)
-                                       ! A.class_ "footnoteRef"
+                                       ! A.class_ "footnote-ref"
                                        ! prefixedId opts ("fnref" ++ ref)
                                        $ (if isJust epubVersion
                                              then id
@@ -1096,7 +1163,7 @@ blockListToNote :: PandocMonad m => WriterOptions -> String -> [Block] -> StateT
 blockListToNote opts ref blocks =
   -- If last block is Para or Plain, include the backlink at the end of
   -- that block. Otherwise, insert a new Plain block with the backlink.
-  let backlink = [Link ("",["footnoteBack"],[]) [Str "↩"] ("#" ++ writerIdentifierPrefix opts ++ "fnref" ++ ref,[])]
+  let backlink = [Link ("",["footnote-back"],[]) [Str "↩"] ("#" ++ "fnref" ++ ref,[])]
       blocks'  = if null blocks
                     then []
                     else let lastBlock   = last blocks
@@ -1109,23 +1176,12 @@ blockListToNote opts ref blocks =
                                   _           -> otherBlocks ++ [lastBlock,
                                                  Plain backlink]
   in  do contents <- blockListToHtml opts blocks'
-         let noteItem = H.li ! (prefixedId opts ("fn" ++ ref)) $ contents
+         let noteItem = H.li ! prefixedId opts ("fn" ++ ref) $ contents
          epubVersion <- gets stEPUBVersion
          let noteItem' = case epubVersion of
                               Just EPUB3 -> noteItem ! customAttribute "epub:type" "footnote"
                               _          -> noteItem
          return $ nl opts >> noteItem'
-
--- Javascript snippet to render all KaTeX elements
-renderKaTeX :: String
-renderKaTeX = unlines [
-    "window.onload = function(){var mathElements = document.getElementsByClassName(\"math\");"
-  , "for (var i=0; i < mathElements.length; i++)"
-  , "{"
-  , " var texText = mathElements[i].firstChild"
-  , " katex.render(texText.data, mathElements[i])"
-  , "}}"
-  ]
 
 isMathEnvironment :: String -> Bool
 isMathEnvironment s = "\\begin{" `isPrefixOf` s &&
@@ -1161,7 +1217,7 @@ isMathEnvironment s = "\\begin{" `isPrefixOf` s &&
 
 allowsMathEnvironments :: HTMLMathMethod -> Bool
 allowsMathEnvironments (MathJax _) = True
-allowsMathEnvironments (MathML)    = True
+allowsMathEnvironments MathML      = True
 allowsMathEnvironments (WebTeX _)  = True
 allowsMathEnvironments _           = False
 

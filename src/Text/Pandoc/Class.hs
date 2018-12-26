@@ -1,8 +1,17 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+#if MIN_VERSION_base(4,8,0)
+#else
+{-# LANGUAGE OverlappingInstances #-}
+#endif
 
 {-
 Copyright (C) 2016-17 Jesse Rosenthal <jrosenthal@jhu.edu>
@@ -51,53 +60,78 @@ module Text.Pandoc.Class ( PandocMonad(..)
                          , readFileFromDirs
                          , report
                          , setTrace
+                         , setRequestHeader
                          , getLog
                          , setVerbosity
+                         , getVerbosity
                          , getMediaBag
                          , setMediaBag
                          , insertMedia
+                         , setUserDataDir
+                         , getUserDataDir
                          , fetchItem
                          , getInputFiles
+                         , setInputFiles
                          , getOutputFile
+                         , setOutputFile
                          , setResourcePath
                          , getResourcePath
                          , PandocIO(..)
                          , PandocPure(..)
-                         , FileTree(..)
+                         , FileTree
                          , FileInfo(..)
                          , addToFileTree
+                         , insertInFileTree
                          , runIO
                          , runIOorExplode
                          , runPure
+                         , readDefaultDataFile
+                         , readDataFile
+                         , fetchMediaResource
                          , fillMediaBag
                          , extractMedia
+                         , toLang
+                         , setTranslations
+                         , translateTerm
+                         , Translations
                          ) where
 
 import Prelude hiding (readFile)
 import System.Random (StdGen, next, mkStdGen)
 import qualified System.Random as IO (newStdGen)
-import Codec.Archive.Zip (Archive, fromArchive, emptyArchive)
+import Codec.Archive.Zip
+import qualified Data.CaseInsensitive as CI
 import Data.Unique (hashUnique)
+import Data.List (stripPrefix)
 import qualified Data.Unique as IO (newUnique)
-import qualified Text.Pandoc.Shared as IO ( readDataFile
-                                          , openURL )
 import qualified Text.Pandoc.UTF8 as UTF8
+import qualified System.Directory as Directory
 import Text.Pandoc.Compat.Time (UTCTime)
 import Text.Pandoc.Logging
 import Text.Parsec (ParsecT, getPosition, sourceLine, sourceName)
 import qualified Text.Pandoc.Compat.Time as IO (getCurrentTime)
 import Text.Pandoc.MIME (MimeType, getMimeType, extensionFromMimeType)
 import Text.Pandoc.Definition
-import Data.Char (toLower)
 import Data.Digest.Pure.SHA (sha1, showDigest)
 import Data.Maybe (fromMaybe)
 import Data.Time.Clock.POSIX ( utcTimeToPOSIXSeconds
                              , posixSecondsToUTCTime
                              , POSIXTime )
 import Data.Time.LocalTime (TimeZone, ZonedTime, utcToZonedTime, utc)
+import Data.ByteString.Base64 (decodeLenient)
 import Network.URI ( escapeURIString, nonStrictRelativeTo,
                      unEscapeString, parseURIReference, isAllowedInURI,
                      parseURI, URI(..) )
+import Network.HTTP.Client
+       (httpLbs, responseBody, responseHeaders,
+        Request(port, host, requestHeaders), parseRequest, newManager)
+import Network.HTTP.Client.Internal (addProxy)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import System.Environment (getEnv)
+import Network.HTTP.Types.Header ( hContentType )
+import Network (withSocketsDo)
+import Data.ByteString.Lazy (toChunks)
+import qualified Control.Exception as E
 import qualified Data.Time.LocalTime as IO (getCurrentTimeZone)
 import Text.Pandoc.MediaBag (MediaBag, lookupMedia, mediaDirectory)
 import Text.Pandoc.Walk (walkM, walk)
@@ -108,23 +142,30 @@ import qualified System.Environment as IO (lookupEnv)
 import System.FilePath.Glob (match, compile)
 import System.Directory (createDirectoryIfMissing, getDirectoryContents,
                           doesDirectoryExist)
-import System.FilePath ((</>), (<.>), takeDirectory,
-         takeExtension, dropExtension, isRelative, normalise)
+import System.FilePath
+       ((</>), (<.>), takeDirectory, takeExtension, dropExtension,
+        isRelative, normalise, splitDirectories)
 import qualified System.FilePath.Glob as IO (glob)
+import qualified System.FilePath.Posix as Posix
 import qualified System.Directory as IO (getModificationTime)
 import Control.Monad as M (fail)
-import Control.Monad.Reader (ReaderT)
 import Control.Monad.State.Strict
 import Control.Monad.Except
-import Control.Monad.Writer (WriterT)
-import Control.Monad.RWS (RWST)
 import Data.Word (Word8)
 import Data.Default
 import System.IO.Error
 import System.IO (stderr)
 import qualified Data.Map as M
 import Text.Pandoc.Error
+import Text.Pandoc.BCP47 (Lang(..), parseBCP47, renderLang)
+import Text.Pandoc.Translations (Term(..), Translations, lookupTerm,
+                                 readTranslations)
 import qualified Debug.Trace
+#ifdef EMBED_DATA_FILES
+import Text.Pandoc.Data (dataFiles)
+#else
+import qualified Paths_pandoc as Paths
+#endif
 
 -- | The PandocMonad typeclass contains all the potentially
 -- IO-related functions used in pandoc's readers and writers.
@@ -152,13 +193,14 @@ class (Functor m, Applicative m, Monad m, MonadError PandocError m)
   -- | Read the strict ByteString contents from a file path,
   -- raising an error on failure.
   readFileStrict :: FilePath -> m B.ByteString
-  -- | Read file from specified user data directory or,
-  -- if not found there, from Cabal data directory.
-  readDataFile :: Maybe FilePath -> FilePath -> m B.ByteString
   -- | Return a list of paths that match a glob, relative to
   -- the working directory.  See 'System.FilePath.Glob' for
   -- the glob syntax.
   glob :: String -> m [FilePath]
+  -- | Returns True if file exists.
+  fileExists :: FilePath -> m Bool
+  -- | Returns the path of data file.
+  getDataFileName :: FilePath -> m FilePath
   -- | Return the modification time of a file.
   getModificationTime :: FilePath -> m UTCTime
   -- | Get the value of the 'CommonState' used by all instances
@@ -191,16 +233,18 @@ setVerbosity :: PandocMonad m => Verbosity -> m ()
 setVerbosity verbosity =
   modifyCommonState $ \st -> st{ stVerbosity = verbosity }
 
+-- | Get the verbosity level.
+getVerbosity :: PandocMonad m => m Verbosity
+getVerbosity = getsCommonState stVerbosity
+
 -- Get the accomulated log messages (in temporal order).
 getLog :: PandocMonad m => m [LogMessage]
 getLog = reverse <$> getsCommonState stLog
 
--- | Log a message using 'logOutput'.  Note that
--- 'logOutput' is called only if the verbosity
--- level exceeds the level of the message, but
--- the message is added to the list of log messages
--- that will be retrieved by 'getLog' regardless
--- of its verbosity level.
+-- | Log a message using 'logOutput'.  Note that 'logOutput' is
+-- called only if the verbosity level exceeds the level of the
+-- message, but the message is added to the list of log messages
+-- that will be retrieved by 'getLog' regardless of its verbosity level.
 report :: PandocMonad m => LogMessage -> m ()
 report msg = do
   verbosity <- getsCommonState stVerbosity
@@ -214,34 +258,70 @@ report msg = do
 setTrace :: PandocMonad m => Bool -> m ()
 setTrace useTracing = modifyCommonState $ \st -> st{stTrace = useTracing}
 
+-- | Set request header to use in HTTP requests.
+setRequestHeader :: PandocMonad m
+                 => String  -- ^ Header name
+                 -> String  -- ^ Value
+                 -> m ()
+setRequestHeader name val = modifyCommonState $ \st ->
+  st{ stRequestHeaders =
+       (name, val) : filter (\(n,_) -> n /= name) (stRequestHeaders st)  }
+
 -- | Initialize the media bag.
 setMediaBag :: PandocMonad m => MediaBag -> m ()
 setMediaBag mb = modifyCommonState $ \st -> st{stMediaBag = mb}
 
+-- Retrieve the media bag.
 getMediaBag :: PandocMonad m => m MediaBag
 getMediaBag = getsCommonState stMediaBag
 
+-- Insert an item into the media bag.
 insertMedia :: PandocMonad m => FilePath -> Maybe MimeType -> BL.ByteString -> m ()
 insertMedia fp mime bs = do
-  mb <- getsCommonState stMediaBag
+  mb <- getMediaBag
   let mb' = MB.insertMedia fp mime bs mb
-  modifyCommonState $ \st -> st{stMediaBag = mb' }
+  setMediaBag mb'
 
-getInputFiles :: PandocMonad m => m (Maybe [FilePath])
+-- Retrieve the input filenames.
+getInputFiles :: PandocMonad m => m [FilePath]
 getInputFiles = getsCommonState stInputFiles
 
+-- Set the input filenames.
+setInputFiles :: PandocMonad m => [FilePath] -> m ()
+setInputFiles fs = do
+  let sourceURL = case fs of
+                    []    -> Nothing
+                    (x:_) -> case parseURI x of
+                                Just u
+                                  | uriScheme u `elem` ["http:","https:"] ->
+                                      Just $ show u{ uriQuery = "",
+                                                     uriFragment = "" }
+                                _ -> Nothing
+
+  modifyCommonState $ \st -> st{ stInputFiles = fs
+                               , stSourceURL = sourceURL }
+
+-- Retrieve the output filename.
 getOutputFile :: PandocMonad m => m (Maybe FilePath)
 getOutputFile = getsCommonState stOutputFile
 
-setResourcePath :: PandocMonad m => [FilePath] -> m ()
-setResourcePath ps = modifyCommonState $ \st -> st{stResourcePath = ps}
+-- Set the output filename.
+setOutputFile :: PandocMonad m => Maybe FilePath -> m ()
+setOutputFile mbf = modifyCommonState $ \st -> st{ stOutputFile = mbf }
 
+-- Retrieve the resource path searched by 'fetchItem'.
 getResourcePath :: PandocMonad m => m [FilePath]
 getResourcePath = getsCommonState stResourcePath
 
+-- Set the resource path searched by 'fetchItem'.
+setResourcePath :: PandocMonad m => [FilePath] -> m ()
+setResourcePath ps = modifyCommonState $ \st -> st{stResourcePath = ps}
+
+-- Get the POSIX time.
 getPOSIXTime :: PandocMonad m => m POSIXTime
 getPOSIXTime = utcTimeToPOSIXSeconds <$> getCurrentTime
 
+-- Get the zoned time.
 getZonedTime :: PandocMonad m => m ZonedTime
 getZonedTime = do
   t <- getCurrentTime
@@ -263,9 +343,18 @@ readFileFromDirs (d:ds) f = catchError
 -- functions like 'setVerbosity' and 'withMediaBag' should be used.
 data CommonState = CommonState { stLog          :: [LogMessage]
                                  -- ^ A list of log messages in reverse order
+                               , stUserDataDir  :: Maybe FilePath
+                                 -- ^ Directory to search for data files
+                               , stSourceURL    :: Maybe String
+                                 -- ^ Absolute URL + dir of 1st source file
+                               , stRequestHeaders :: [(String, String)]
+                                 -- ^ Headers to add for HTTP requests
                                , stMediaBag     :: MediaBag
                                  -- ^ Media parsed from binary containers
-                               , stInputFiles   :: Maybe [FilePath]
+                               , stTranslations :: Maybe
+                                                  (Lang, Maybe Translations)
+                                 -- ^ Translations for localization
+                               , stInputFiles   :: [FilePath]
                                  -- ^ List of input files from command line
                                , stOutputFile   :: Maybe FilePath
                                  -- ^ Output file from command line
@@ -281,18 +370,91 @@ data CommonState = CommonState { stLog          :: [LogMessage]
 
 instance Default CommonState where
   def = CommonState { stLog = []
+                    , stUserDataDir = Nothing
+                    , stSourceURL = Nothing
+                    , stRequestHeaders = []
                     , stMediaBag = mempty
-                    , stInputFiles = Nothing
+                    , stTranslations = Nothing
+                    , stInputFiles = []
                     , stOutputFile = Nothing
                     , stResourcePath = ["."]
                     , stVerbosity = WARNING
                     , stTrace = False
                     }
 
+-- | Convert BCP47 string to a Lang, issuing warning
+-- if there are problems.
+toLang :: PandocMonad m => Maybe String -> m (Maybe Lang)
+toLang Nothing = return Nothing
+toLang (Just s) =
+  case parseBCP47 s of
+       Left _ -> do
+         report $ InvalidLang s
+         return Nothing
+       Right l -> return (Just l)
+
+-- | Select the language to use with 'translateTerm'.
+-- Note that this does not read a translation file;
+-- that is only done the first time 'translateTerm' is
+-- used.
+setTranslations :: PandocMonad m => Lang -> m ()
+setTranslations lang =
+  modifyCommonState $ \st -> st{ stTranslations = Just (lang, Nothing) }
+
+-- | Load term map.
+getTranslations :: PandocMonad m => m Translations
+getTranslations = do
+  mbtrans <- getsCommonState stTranslations
+  case mbtrans of
+       Nothing -> return mempty  -- no language defined
+       Just (_, Just t) -> return t
+       Just (lang, Nothing) -> do  -- read from file
+         let translationFile = "translations/" ++ renderLang lang ++ ".yaml"
+         let fallbackFile = "translations/" ++ langLanguage lang ++ ".yaml"
+         let getTrans fp = do
+               bs <- readDataFile fp
+               case readTranslations (UTF8.toString bs) of
+                    Left e   -> do
+                      report $ CouldNotLoadTranslations (renderLang lang)
+                        (fp ++ ": " ++ e)
+                      -- make sure we don't try again...
+                      modifyCommonState $ \st ->
+                        st{ stTranslations = Nothing }
+                      return mempty
+                    Right t -> do
+                      modifyCommonState $ \st ->
+                                  st{ stTranslations = Just (lang, Just t) }
+                      return t
+         catchError (getTrans translationFile)
+           (\_ ->
+             catchError (getTrans fallbackFile)
+               (\e -> do
+                 report $ CouldNotLoadTranslations (renderLang lang)
+                          $ case e of
+                               PandocCouldNotFindDataFileError _ ->
+                                 "data file " ++ fallbackFile ++ " not found"
+                               _ -> ""
+                 -- make sure we don't try again...
+                 modifyCommonState $ \st -> st{ stTranslations = Nothing }
+                 return mempty))
+
+-- | Get a translation from the current term map.
+-- Issue a warning if the term is not defined.
+translateTerm :: PandocMonad m => Term -> m String
+translateTerm term = do
+  translations <- getTranslations
+  case lookupTerm term translations of
+       Just s -> return s
+       Nothing -> do
+         report $ NoTranslation (show term)
+         return ""
+
 -- | Evaluate a 'PandocIO' operation.
 runIO :: PandocIO a -> IO (Either PandocError a)
 runIO ma = flip evalStateT def $ runExceptT $ unPandocIO ma
 
+-- | Evaluate a 'PandocIO' operation, handling any errors
+-- by exiting with an appropriate message and error status.
 runIOorExplode :: PandocIO a -> IO a
 runIOorExplode ma = runIO ma >>= handleError
 
@@ -305,11 +467,12 @@ newtype PandocIO a = PandocIO {
              , MonadError PandocError
              )
 
+-- | Utility function to lift IO errors into 'PandocError's.
 liftIOError :: (String -> IO a) -> String -> PandocIO a
 liftIOError f u = do
   res <- liftIO $ tryIOError $ f u
   case res of
-         Left e -> throwError $ PandocIOError u e
+         Left e  -> throwError $ PandocIOError u e
          Right r -> return r
 
 instance PandocMonad PandocIO where
@@ -318,22 +481,50 @@ instance PandocMonad PandocIO where
   getCurrentTimeZone = liftIO IO.getCurrentTimeZone
   newStdGen = liftIO IO.newStdGen
   newUniqueHash = hashUnique <$> liftIO IO.newUnique
-  openURL u = do
-    report $ Fetching u
-    res <- liftIO (IO.openURL u)
-    case res of
-         Right r -> return r
-         Left e  -> throwError $ PandocHttpError u e
+
+  openURL u
+   | Just u'' <- stripPrefix "data:" u = do
+       let mime     = takeWhile (/=',') u''
+       let contents = UTF8.fromString $
+                       unEscapeString $ drop 1 $ dropWhile (/=',') u''
+       return (decodeLenient contents, Just mime)
+   | otherwise = do
+       let toReqHeader (n, v) = (CI.mk (UTF8.fromString n), UTF8.fromString v)
+       customHeaders <- map toReqHeader <$> getsCommonState stRequestHeaders
+       report $ Fetching u
+       res <- liftIO $ E.try $ withSocketsDo $ do
+         let parseReq = parseRequest
+         proxy <- tryIOError (getEnv "http_proxy")
+         let addProxy' x = case proxy of
+                              Left _ -> return x
+                              Right pr -> parseReq pr >>= \r ->
+                                  return (addProxy (host r) (port r) x)
+         req <- parseReq u >>= addProxy'
+         let req' = req{requestHeaders = customHeaders ++ requestHeaders req}
+         resp <- newManager tlsManagerSettings >>= httpLbs req'
+         return (B.concat $ toChunks $ responseBody resp,
+                 UTF8.toString `fmap` lookup hContentType (responseHeaders resp))
+
+       case res of
+            Right r -> return r
+            Left e  -> throwError $ PandocHttpError u e
+
   readFileLazy s = liftIOError BL.readFile s
   readFileStrict s = liftIOError B.readFile s
-  readDataFile mfp fname = liftIOError (IO.readDataFile mfp) fname
-  glob = liftIO . IO.glob
-  getModificationTime fp = liftIOError IO.getModificationTime fp
+
+  glob = liftIOError IO.glob
+  fileExists = liftIOError Directory.doesFileExist
+#ifdef EMBED_DATA_FILES
+  getDataFileName = return
+#else
+  getDataFileName = liftIOError Paths.getDataFileName
+#endif
+  getModificationTime = liftIOError IO.getModificationTime
   getCommonState = PandocIO $ lift get
   putCommonState x = PandocIO $ lift $ put x
   logOutput msg = liftIO $ do
-    UTF8.hPutStr stderr $ "[" ++
-       map toLower (show (messageVerbosity msg)) ++ "] "
+    UTF8.hPutStr stderr $
+        "[" ++ show (messageVerbosity msg) ++ "] "
     alertIndent $ lines $ showLogMessage msg
 
 alertIndent :: [String] -> IO ()
@@ -341,7 +532,7 @@ alertIndent [] = return ()
 alertIndent (l:ls) = do
   UTF8.hPutStrLn stderr l
   mapM_ go ls
-  where go l' = do UTF8.hPutStr stderr "! "
+  where go l' = do UTF8.hPutStr stderr "  "
                    UTF8.hPutStrLn stderr l'
 
 -- | Specialized version of parseURIReference that disallows
@@ -355,23 +546,33 @@ parseURIReference' s =
          | null (uriScheme u)        -> Just u  -- protocol-relative
        _                             -> Nothing
 
+-- | Set the user data directory in common state.
+setUserDataDir :: PandocMonad m
+               => Maybe FilePath
+               -> m ()
+setUserDataDir mbfp = modifyCommonState $ \st -> st{ stUserDataDir = mbfp }
+
+-- | Get the user data directory from common state.
+getUserDataDir :: PandocMonad m
+               => m (Maybe FilePath)
+getUserDataDir = getsCommonState stUserDataDir
+
 -- | Fetch an image or other item from the local filesystem or the net.
 -- Returns raw content and maybe mime type.
 fetchItem :: PandocMonad m
-          => Maybe String
-          -> String
+          => String
           -> m (B.ByteString, Maybe MimeType)
-fetchItem sourceURL s = do
+fetchItem s = do
   mediabag <- getMediaBag
   case lookupMedia s mediabag of
     Just (mime, bs) -> return (BL.toStrict bs, Just mime)
-    Nothing -> downloadOrRead sourceURL s
+    Nothing -> downloadOrRead s
 
 downloadOrRead :: PandocMonad m
-               => Maybe String
-               -> String
+               => String
                -> m (B.ByteString, Maybe MimeType)
-downloadOrRead sourceURL s =
+downloadOrRead s = do
+  sourceURL <- getsCommonState stSourceURL
   case (sourceURL >>= parseURIReference' .
                        ensureEscaped, ensureEscaped s) of
     (Just u, s') -> -- try fetching from relative path at source
@@ -410,29 +611,217 @@ downloadOrRead sourceURL s =
          convertSlash '\\' = '/'
          convertSlash x    = x
 
+-- Retrieve default reference.docx.
+getDefaultReferenceDocx :: PandocMonad m => m Archive
+getDefaultReferenceDocx = do
+  let paths = ["[Content_Types].xml",
+               "_rels/.rels",
+               "docProps/app.xml",
+               "docProps/core.xml",
+               "word/document.xml",
+               "word/fontTable.xml",
+               "word/footnotes.xml",
+               "word/comments.xml",
+               "word/numbering.xml",
+               "word/settings.xml",
+               "word/webSettings.xml",
+               "word/styles.xml",
+               "word/_rels/document.xml.rels",
+               "word/_rels/footnotes.xml.rels",
+               "word/theme/theme1.xml"]
+  let toLazy = BL.fromChunks . (:[])
+  let pathToEntry path = do
+        epochtime <- (floor . utcTimeToPOSIXSeconds) <$> getCurrentTime
+        contents <- toLazy <$> readDataFile ("docx/" ++ path)
+        return $ toEntry path epochtime contents
+  datadir <- getUserDataDir
+  mbArchive <- case datadir of
+                    Nothing   -> return Nothing
+                    Just d    -> do
+                       exists <- fileExists (d </> "reference.docx")
+                       if exists
+                          then return (Just (d </> "reference.docx"))
+                          else return Nothing
+  case mbArchive of
+     Just arch -> toArchive <$> readFileLazy arch
+     Nothing   -> foldr addEntryToArchive emptyArchive <$>
+                     mapM pathToEntry paths
+
+-- Retrieve default reference.odt.
+getDefaultReferenceODT :: PandocMonad m => m Archive
+getDefaultReferenceODT = do
+  let paths = ["mimetype",
+               "manifest.rdf",
+               "styles.xml",
+               "content.xml",
+               "meta.xml",
+               "settings.xml",
+               "Configurations2/accelerator/current.xml",
+               "Thumbnails/thumbnail.png",
+               "META-INF/manifest.xml"]
+  let pathToEntry path = do epochtime <- floor `fmap` getPOSIXTime
+                            contents <- (BL.fromChunks . (:[])) `fmap`
+                                          readDataFile ("odt/" ++ path)
+                            return $ toEntry path epochtime contents
+  datadir <- getUserDataDir
+  mbArchive <- case datadir of
+                    Nothing   -> return Nothing
+                    Just d    -> do
+                       exists <- fileExists (d </> "reference.odt")
+                       if exists
+                          then return (Just (d </> "reference.odt"))
+                          else return Nothing
+  case mbArchive of
+     Just arch -> toArchive <$> readFileLazy arch
+     Nothing   -> foldr addEntryToArchive emptyArchive <$>
+                     mapM pathToEntry paths
+
+getDefaultReferencePptx :: PandocMonad m => m Archive
+getDefaultReferencePptx = do
+  -- We're going to narrow this down substantially once we get it
+  -- working.
+  let paths = [ "[Content_Types].xml"
+              , "_rels/.rels"
+              , "docProps/app.xml"
+              , "docProps/core.xml"
+              , "ppt/_rels/presentation.xml.rels"
+              , "ppt/presProps.xml"
+              , "ppt/presentation.xml"
+              , "ppt/slideLayouts/_rels/slideLayout1.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout2.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout3.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout4.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout5.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout6.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout7.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout8.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout9.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout10.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout11.xml.rels"
+              , "ppt/slideLayouts/slideLayout1.xml"
+              , "ppt/slideLayouts/slideLayout10.xml"
+              , "ppt/slideLayouts/slideLayout11.xml"
+              , "ppt/slideLayouts/slideLayout2.xml"
+              , "ppt/slideLayouts/slideLayout3.xml"
+              , "ppt/slideLayouts/slideLayout4.xml"
+              , "ppt/slideLayouts/slideLayout5.xml"
+              , "ppt/slideLayouts/slideLayout6.xml"
+              , "ppt/slideLayouts/slideLayout7.xml"
+              , "ppt/slideLayouts/slideLayout8.xml"
+              , "ppt/slideLayouts/slideLayout9.xml"
+              , "ppt/slideMasters/_rels/slideMaster1.xml.rels"
+              , "ppt/slideMasters/slideMaster1.xml"
+              , "ppt/slides/_rels/slide1.xml.rels"
+              , "ppt/slides/slide1.xml"
+              , "ppt/slides/_rels/slide2.xml.rels"
+              , "ppt/slides/slide2.xml"
+              , "ppt/tableStyles.xml"
+              , "ppt/theme/theme1.xml"
+              , "ppt/viewProps.xml"
+              -- These relate to notes slides.
+              , "ppt/notesMasters/notesMaster1.xml"
+              , "ppt/notesMasters/_rels/notesMaster1.xml.rels"
+              , "ppt/notesSlides/notesSlide1.xml"
+              , "ppt/notesSlides/_rels/notesSlide1.xml.rels"
+              , "ppt/notesSlides/notesSlide2.xml"
+              , "ppt/notesSlides/_rels/notesSlide2.xml.rels"
+              , "ppt/theme/theme2.xml"
+              ]
+  let toLazy = BL.fromChunks . (:[])
+  let pathToEntry path = do
+        epochtime <- (floor . utcTimeToPOSIXSeconds) <$> getCurrentTime
+        contents <- toLazy <$> readDataFile ("pptx/" ++ path)
+        return $ toEntry path epochtime contents
+  datadir <- getUserDataDir
+  mbArchive <- case datadir of
+                    Nothing   -> return Nothing
+                    Just d    -> do
+                       exists <- fileExists (d </> "reference.pptx")
+                       if exists
+                          then return (Just (d </> "reference.pptx"))
+                          else return Nothing
+  case mbArchive of
+     Just arch -> toArchive <$> readFileLazy arch
+     Nothing   -> foldr addEntryToArchive emptyArchive <$>
+                     mapM pathToEntry paths
+
+
+-- | Read file from user data directory or,
+-- if not found there, from Cabal data directory.
+readDataFile :: PandocMonad m => FilePath -> m B.ByteString
+readDataFile fname = do
+  datadir <- getUserDataDir
+  case datadir of
+       Nothing -> readDefaultDataFile fname
+       Just userDir -> do
+         exists <- fileExists (userDir </> fname)
+         if exists
+            then readFileStrict (userDir </> fname)
+            else readDefaultDataFile fname
+
+-- | Read file from from Cabal data directory.
+readDefaultDataFile :: PandocMonad m => FilePath -> m B.ByteString
+readDefaultDataFile "reference.docx" =
+  (B.concat . BL.toChunks . fromArchive) <$> getDefaultReferenceDocx
+readDefaultDataFile "reference.pptx" =
+  (B.concat . BL.toChunks . fromArchive) <$> getDefaultReferencePptx
+readDefaultDataFile "reference.odt" =
+  (B.concat . BL.toChunks . fromArchive) <$> getDefaultReferenceODT
+readDefaultDataFile fname =
+#ifdef EMBED_DATA_FILES
+  case lookup (makeCanonical fname) dataFiles of
+    Nothing       -> throwError $ PandocCouldNotFindDataFileError fname
+    Just contents -> return contents
+#else
+  getDataFileName fname' >>= checkExistence >>= readFileStrict
+    where fname' = if fname == "MANUAL.txt" then fname else "data" </> fname
+
+checkExistence :: PandocMonad m => FilePath -> m FilePath
+checkExistence fn = do
+  exists <- fileExists fn
+  if exists
+     then return fn
+     else throwError $ PandocCouldNotFindDataFileError fn
+#endif
+
+makeCanonical :: FilePath -> FilePath
+makeCanonical = Posix.joinPath . transformPathParts . splitDirectories
+ where  transformPathParts = reverse . foldl go []
+        go as     "."  = as
+        go (_:as) ".." = as
+        go as     x    = x : as
+
 withPaths :: PandocMonad m => [FilePath] -> (FilePath -> m a) -> FilePath -> m a
 withPaths [] _ fp = throwError $ PandocResourceNotFound fp
 withPaths (p:ps) action fp =
   catchError (action (p </> fp))
              (\_ -> withPaths ps action fp)
 
+-- | Fetch local or remote resource (like an image) and provide data suitable
+-- for adding it to the MediaBag.
+fetchMediaResource :: PandocMonad m
+              => String -> m (FilePath, Maybe MimeType, BL.ByteString)
+fetchMediaResource src = do
+  (bs, mt) <- downloadOrRead src
+  let ext = fromMaybe (takeExtension src)
+                      (mt >>= extensionFromMimeType)
+  let bs' = BL.fromChunks [bs]
+  let basename = showDigest $ sha1 bs'
+  let fname = basename <.> ext
+  return (fname, mt, bs')
+
 -- | Traverse tree, filling media bag for any images that
 -- aren't already in the media bag.
-fillMediaBag :: PandocMonad m => Maybe String -> Pandoc -> m Pandoc
-fillMediaBag sourceURL d = walkM handleImage d
+fillMediaBag :: PandocMonad m => Pandoc -> m Pandoc
+fillMediaBag d = walkM handleImage d
   where handleImage :: PandocMonad m => Inline -> m Inline
         handleImage (Image attr lab (src, tit)) = catchError
           (do mediabag <- getMediaBag
               case lookupMedia src mediabag of
                 Just (_, _) -> return $ Image attr lab (src, tit)
                 Nothing -> do
-                  (bs, mt) <- downloadOrRead sourceURL src
-                  let ext = fromMaybe (takeExtension src)
-                              (mt >>= extensionFromMimeType)
-                  let bs' = BL.fromChunks [bs]
-                  let basename = showDigest $ sha1 bs'
-                  let fname = basename <.> ext
-                  insertMedia fname mt bs'
+                  (fname, mt, bs) <- fetchMediaResource src
+                  insertMedia fname mt bs
                   return $ Image attr lab (fname, tit))
           (\e ->
               case e of
@@ -459,6 +848,7 @@ extractMedia dir d = do
           mapM_ (writeMedia dir media) fps
           return $ walk (adjustImagePath dir fps) d
 
+-- Write the contents of a media bag to a path.
 writeMedia :: FilePath -> MediaBag -> FilePath -> PandocIO ()
 writeMedia dir mediabag subpath = do
   -- we join and split to convert a/b/c to a\b\c on Windows;
@@ -469,15 +859,16 @@ writeMedia dir mediabag subpath = do
        Nothing -> throwError $ PandocResourceNotFound subpath
        Just (_, bs) -> do
          report $ Extracting fullpath
-         liftIO $ do
-           createDirectoryIfMissing True $ takeDirectory fullpath
-           BL.writeFile fullpath bs
+         liftIOError (createDirectoryIfMissing True) (takeDirectory fullpath)
+         liftIOError (\p -> BL.writeFile p bs) fullpath
 
 adjustImagePath :: FilePath -> [FilePath] -> Inline -> Inline
 adjustImagePath dir paths (Image attr lab (src, tit))
    | src `elem` paths = Image attr lab (dir ++ "/" ++ src, tit)
 adjustImagePath _ _ x = x
 
+-- | The 'PureState' contains ersatz representations
+-- of things that would normally be obtained through IO.
 data PureState = PureState { stStdGen     :: StdGen
                            , stWord8Store :: [Word8] -- should be
                                                      -- inifinite,
@@ -491,10 +882,11 @@ data PureState = PureState { stStdGen     :: StdGen
                            , stTime :: UTCTime
                            , stTimeZone :: TimeZone
                            , stReferenceDocx :: Archive
+                           , stReferencePptx :: Archive
                            , stReferenceODT :: Archive
                            , stFiles :: FileTree
-                           , stUserDataDir :: FileTree
-                           , stCabalDataDir :: FileTree
+                           , stUserDataFiles :: FileTree
+                           , stCabalDataFiles :: FileTree
                            }
 
 instance Default PureState where
@@ -505,10 +897,11 @@ instance Default PureState where
                   , stTime = posixSecondsToUTCTime 0
                   , stTimeZone = utc
                   , stReferenceDocx = emptyArchive
+                  , stReferencePptx = emptyArchive
                   , stReferenceODT = emptyArchive
                   , stFiles = mempty
-                  , stUserDataDir = mempty
-                  , stCabalDataDir = mempty
+                  , stUserDataFiles = mempty
+                  , stCabalDataFiles = mempty
                   }
 
 
@@ -533,12 +926,13 @@ newtype FileTree = FileTree {unFileTree :: M.Map FilePath FileInfo}
   deriving (Monoid)
 
 getFileInfo :: FilePath -> FileTree -> Maybe FileInfo
-getFileInfo fp tree = M.lookup fp $ unFileTree tree
+getFileInfo fp tree =
+  M.lookup (makeCanonical fp) (unFileTree tree)
 
 -- | Add the specified file to the FileTree. If file
 -- is a directory, add its contents recursively.
 addToFileTree :: FileTree -> FilePath -> IO FileTree
-addToFileTree (FileTree treemap) fp = do
+addToFileTree tree fp = do
   isdir <- doesDirectoryExist fp
   if isdir
      then do -- recursively add contents of directories
@@ -546,13 +940,17 @@ addToFileTree (FileTree treemap) fp = do
            isSpecial "."  = True
            isSpecial _    = False
        fs <- (map (fp </>) . filter (not . isSpecial)) <$> getDirectoryContents fp
-       foldM addToFileTree (FileTree treemap) fs
+       foldM addToFileTree tree fs
      else do
        contents <- B.readFile fp
        mtime <- IO.getModificationTime fp
-       return $ FileTree $
-                M.insert fp FileInfo{ infoFileMTime = mtime
-                                    , infoFileContents = contents } treemap
+       return $ insertInFileTree fp FileInfo{ infoFileMTime = mtime
+                                            , infoFileContents = contents } tree
+
+-- | Insert an ersatz file into the 'FileTree'.
+insertInFileTree :: FilePath -> FileInfo -> FileTree -> FileTree
+insertInFileTree fp info (FileTree treemap) =
+  FileTree $ M.insert (makeCanonical fp) info treemap
 
 newtype PandocPure a = PandocPure {
   unPandocPure :: ExceptT PandocError
@@ -563,6 +961,7 @@ newtype PandocPure a = PandocPure {
              , MonadError PandocError
              )
 
+-- Run a 'PandocPure' operation.
 runPure :: PandocPure a -> Either PandocError a
 runPure x = flip evalState def $
             flip evalStateT def $
@@ -602,22 +1001,18 @@ instance PandocMonad PandocPure where
     case infoFileContents <$> getFileInfo fp fps of
       Just bs -> return bs
       Nothing -> throwError $ PandocResourceNotFound fp
-  readDataFile Nothing "reference.docx" =
-    (B.concat . BL.toChunks . fromArchive) <$> getsPureState stReferenceDocx
-  readDataFile Nothing "reference.odt" =
-    (B.concat . BL.toChunks . fromArchive) <$> getsPureState stReferenceODT
-  readDataFile Nothing fname = do
-    let fname' = if fname == "MANUAL.txt" then fname else "data" </> fname
-    readFileStrict fname'
-  readDataFile (Just userDir) fname = do
-    userDirFiles <- getsPureState stUserDataDir
-    case infoFileContents <$> getFileInfo (userDir </> fname) userDirFiles of
-      Just bs -> return bs
-      Nothing -> readDataFile Nothing fname
 
   glob s = do
     FileTree ftmap <- getsPureState stFiles
     return $ filter (match (compile s)) $ M.keys ftmap
+
+  fileExists fp = do
+    fps <- getsPureState stFiles
+    case getFileInfo fp fps of
+         Nothing -> return False
+         Just _  -> return True
+
+  getDataFileName fp = return $ "data/" ++ fp
 
   getModificationTime fp = do
     fps <- getsPureState stFiles
@@ -631,7 +1026,13 @@ instance PandocMonad PandocPure where
 
   logOutput _msg = return ()
 
-instance PandocMonad m => PandocMonad (ParsecT s st m) where
+-- This requires UndecidableInstances.  We could avoid that
+-- by repeating the definitions below for every monad transformer
+-- we use: ReaderT, WriterT, StateT, RWST.  But this seems to
+-- be harmless.
+instance (MonadTrans t, PandocMonad m, Functor (t m),
+          MonadError PandocError (t m), Monad (t m),
+          Applicative (t m)) => PandocMonad (t m) where
   lookupEnv = lift . lookupEnv
   getCurrentTime = lift getCurrentTime
   getCurrentTimeZone = lift getCurrentTimeZone
@@ -640,8 +1041,30 @@ instance PandocMonad m => PandocMonad (ParsecT s st m) where
   openURL = lift . openURL
   readFileLazy = lift . readFileLazy
   readFileStrict = lift . readFileStrict
-  readDataFile mbuserdir = lift . readDataFile mbuserdir
   glob = lift . glob
+  fileExists = lift . fileExists
+  getDataFileName = lift . getDataFileName
+  getModificationTime = lift . getModificationTime
+  getCommonState = lift getCommonState
+  putCommonState = lift . putCommonState
+  logOutput = lift . logOutput
+
+#if MIN_VERSION_base(4,8,0)
+instance {-# OVERLAPS #-} PandocMonad m => PandocMonad (ParsecT s st m) where
+#else
+instance PandocMonad m => PandocMonad (ParsecT s st m) where
+#endif
+  lookupEnv = lift . lookupEnv
+  getCurrentTime = lift getCurrentTime
+  getCurrentTimeZone = lift getCurrentTimeZone
+  newStdGen = lift newStdGen
+  newUniqueHash = lift newUniqueHash
+  openURL = lift . openURL
+  readFileLazy = lift . readFileLazy
+  readFileStrict = lift . readFileStrict
+  glob = lift . glob
+  fileExists = lift . fileExists
+  getDataFileName = lift . getDataFileName
   getModificationTime = lift . getModificationTime
   getCommonState = lift getCommonState
   putCommonState = lift . putCommonState
@@ -656,69 +1079,4 @@ instance PandocMonad m => PandocMonad (ParsecT s st m) where
                then " of chunk"
                else "")
         (return ())
-  logOutput = lift . logOutput
-
-
-instance PandocMonad m => PandocMonad (ReaderT r m) where
-  lookupEnv = lift . lookupEnv
-  getCurrentTime = lift getCurrentTime
-  getCurrentTimeZone = lift getCurrentTimeZone
-  newStdGen = lift newStdGen
-  newUniqueHash = lift newUniqueHash
-  openURL = lift . openURL
-  readFileLazy = lift . readFileLazy
-  readFileStrict = lift . readFileStrict
-  readDataFile mbuserdir = lift . readDataFile mbuserdir
-  glob = lift . glob
-  getModificationTime = lift . getModificationTime
-  getCommonState = lift getCommonState
-  putCommonState = lift . putCommonState
-  logOutput = lift . logOutput
-
-instance (PandocMonad m, Monoid w) => PandocMonad (WriterT w m) where
-  lookupEnv = lift . lookupEnv
-  getCurrentTime = lift getCurrentTime
-  getCurrentTimeZone = lift getCurrentTimeZone
-  newStdGen = lift newStdGen
-  newUniqueHash = lift newUniqueHash
-  openURL = lift . openURL
-  readFileLazy = lift . readFileLazy
-  readFileStrict = lift . readFileStrict
-  readDataFile mbuserdir = lift . readDataFile mbuserdir
-  glob = lift . glob
-  getModificationTime = lift . getModificationTime
-  getCommonState = lift getCommonState
-  putCommonState = lift . putCommonState
-  logOutput = lift . logOutput
-
-instance (PandocMonad m, Monoid w) => PandocMonad (RWST r w st m) where
-  lookupEnv = lift . lookupEnv
-  getCurrentTime = lift getCurrentTime
-  getCurrentTimeZone = lift getCurrentTimeZone
-  newStdGen = lift newStdGen
-  newUniqueHash = lift newUniqueHash
-  openURL = lift . openURL
-  readFileLazy = lift . readFileLazy
-  readFileStrict = lift . readFileStrict
-  readDataFile mbuserdir = lift . readDataFile mbuserdir
-  glob = lift . glob
-  getModificationTime = lift . getModificationTime
-  getCommonState = lift getCommonState
-  putCommonState = lift . putCommonState
-  logOutput = lift . logOutput
-
-instance PandocMonad m => PandocMonad (StateT st m) where
-  lookupEnv = lift . lookupEnv
-  getCurrentTime = lift getCurrentTime
-  getCurrentTimeZone = lift getCurrentTimeZone
-  newStdGen = lift newStdGen
-  newUniqueHash = lift newUniqueHash
-  openURL = lift . openURL
-  readFileLazy = lift . readFileLazy
-  readFileStrict = lift . readFileStrict
-  readDataFile mbuserdir = lift . readDataFile mbuserdir
-  glob = lift . glob
-  getModificationTime = lift . getModificationTime
-  getCommonState = lift getCommonState
-  putCommonState = lift . putCommonState
   logOutput = lift . logOutput

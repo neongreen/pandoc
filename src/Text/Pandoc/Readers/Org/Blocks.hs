@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2014-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+Copyright (C) 2014-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 {-# LANGUAGE RecordWildCards  #-}
 {- |
    Module      : Text.Pandoc.Readers.Org.Blocks
-   Copyright   : Copyright (C) 2014-2017 Albert Krewinkel
+   Copyright   : Copyright (C) 2014-2018 Albert Krewinkel
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -41,7 +41,6 @@ import Text.Pandoc.Readers.Org.Shared (cleanLinkString, isImageFilename,
                                        originalLang, translateLang)
 
 import Text.Pandoc.Builder (Blocks, Inlines)
-import qualified Text.Pandoc.Builder as B
 import Text.Pandoc.Class (PandocMonad)
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
@@ -53,6 +52,9 @@ import Data.Default (Default)
 import Data.List (foldl', isPrefixOf)
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Monoid ((<>))
+
+import qualified Text.Pandoc.Builder as B
+import qualified Text.Pandoc.Walk as Walk
 
 --
 -- parsing blocks
@@ -509,19 +511,18 @@ include :: PandocMonad m => OrgParser m (F Blocks)
 include = try $ do
   metaLineStart <* stringAnyCase "include:" <* skipSpaces
   filename <- includeTarget
-  blockType <- optionMaybe $ skipSpaces *> many1 alphaNum
-  blocksParser <- case blockType of
-                    Just "example" ->
-                      return $ pure . B.codeBlock <$> parseRaw
-                    Just "export" -> do
-                      format <- skipSpaces *> many (noneOf "\n\r\t ")
-                      return $ pure . B.rawBlock format <$> parseRaw
-                    Just "src" -> do
-                      language <- skipSpaces *> many (noneOf "\n\r\t ")
-                      let attr = (mempty, [language], mempty)
-                      return $ pure . B.codeBlockWith attr <$> parseRaw
-                    _ -> return $ pure . B.fromList <$> blockList
-  anyLine
+  includeArgs <- many (try $ skipSpaces *> many1 alphaNum)
+  params <- keyValues
+  blocksParser <- case includeArgs of
+      ("example" : _) -> return $ pure . B.codeBlock <$> parseRaw
+      ["export"] -> return . returnF $ B.fromList []
+      ["export", format] -> return $ pure . B.rawBlock format <$> parseRaw
+      ("src" : rest) -> do
+        let attr = case rest of
+                     [lang] -> (mempty, [lang], mempty)
+                     _ -> nullAttr
+        return $ pure . B.codeBlockWith attr <$> parseRaw
+      _ -> return $ return . B.fromList . blockFilter params <$> blockList
   insertIncludedFileF blocksParser ["."] filename
  where
   includeTarget :: PandocMonad m => OrgParser m FilePath
@@ -531,6 +532,28 @@ include = try $ do
 
   parseRaw :: PandocMonad m => OrgParser m String
   parseRaw = many anyChar
+
+  blockFilter :: [(String, String)] -> [Block] -> [Block]
+  blockFilter params blks =
+    let minlvl = lookup "minlevel" params
+    in case (minlvl >>= safeRead :: Maybe Int) of
+         Nothing -> blks
+         Just lvl -> let levels = Walk.query headerLevel blks
+                         -- CAVE: partial function in else
+                         curMin = if null levels then 0 else minimum levels
+                     in Walk.walk (shiftHeader (curMin - lvl)) blks
+
+  headerLevel :: Block -> [Int]
+  headerLevel (Header lvl _attr _content) = [lvl]
+  headerLevel _ = []
+
+  shiftHeader :: Int -> Block -> Block
+  shiftHeader shift blk =
+    if shift <= 0
+    then blk
+    else case blk of
+      (Header lvl attr content) -> Header (lvl - shift) attr content
+      _ -> blk
 
 rawExportLine :: PandocMonad m => OrgParser m Blocks
 rawExportLine = try $ do
@@ -724,26 +747,27 @@ latexEnd envName = try $
 noteBlock :: PandocMonad m => OrgParser m (F Blocks)
 noteBlock = try $ do
   ref <- noteMarker <* skipSpaces <* updateLastPreCharPos
-  content <- mconcat <$> blocksTillHeaderOrNote
+  content <- mconcat <$> many1Till block endOfFootnote
   addToNotesTable (ref, content)
   return mempty
  where
-   blocksTillHeaderOrNote =
-     many1Till block (eof <|> () <$ lookAhead noteMarker
-                          <|> () <$ lookAhead headerStart)
+   endOfFootnote =  eof
+                <|> () <$ lookAhead noteMarker
+                <|> () <$ lookAhead headerStart
+                <|> () <$ lookAhead (try $ blankline *> blankline)
 
 -- Paragraphs or Plain text
 paraOrPlain :: PandocMonad m => OrgParser m (F Blocks)
 paraOrPlain = try $ do
   -- Make sure we are not looking at a headline
-  notFollowedBy' (char '*' *> oneOf " *")
+  notFollowedBy' headerStart
   ils <- inlines
   nl <- option False (newline *> return True)
   -- Read block as paragraph, except if we are in a list context and the block
   -- is directly followed by a list item, in which case the block is read as
   -- plain text.
   try (guard nl
-       *> notFollowedBy (inList *> (() <$ orderedListStart <|> bulletListStart))
+       *> notFollowedBy (inList *> (orderedListStart <|> bulletListStart))
        *> return (B.para <$> ils))
     <|>  return (B.plain <$> ils)
 
@@ -756,40 +780,34 @@ list :: PandocMonad m => OrgParser m (F Blocks)
 list = choice [ definitionList, bulletList, orderedList ] <?> "list"
 
 definitionList :: PandocMonad m => OrgParser m (F Blocks)
-definitionList = try $ do n <- lookAhead (bulletListStart' Nothing)
-                          fmap (B.definitionList . compactifyDL) . sequence
-                            <$> many1 (definitionListItem $ bulletListStart' (Just n))
+definitionList = try $ do
+  indent <- lookAhead bulletListStart
+  fmap (B.definitionList . compactifyDL) . sequence
+    <$> many1 (definitionListItem (bulletListStart `indented` indent))
 
 bulletList :: PandocMonad m => OrgParser m (F Blocks)
-bulletList = try $ do n <- lookAhead (bulletListStart' Nothing)
-                      fmap (B.bulletList . compactify) . sequence
-                        <$> many1 (listItem (bulletListStart' $ Just n))
+bulletList = try $ do
+  indent <- lookAhead bulletListStart
+  fmap (B.bulletList . compactify) . sequence
+    <$> many1 (listItem (bulletListStart `indented` indent))
+
+indented :: Monad m => OrgParser m Int -> Int -> OrgParser m Int
+indented indentedMarker minIndent = try $ do
+  n <- indentedMarker
+  guard (minIndent <= n)
+  return n
 
 orderedList :: PandocMonad m => OrgParser m (F Blocks)
-orderedList = fmap (B.orderedList . compactify) . sequence
-              <$> many1 (listItem orderedListStart)
-
-bulletListStart' :: Monad m => Maybe Int -> OrgParser m Int
--- returns length of bulletList prefix, inclusive of marker
-bulletListStart' Nothing  = do ind <- length <$> many spaceChar
-                               oneOf (bullets $ ind == 0)
-                               skipSpaces1
-                               return (ind + 1)
-bulletListStart' (Just n) = do count (n-1) spaceChar
-                               oneOf (bullets $ n == 1)
-                               many1 spaceChar
-                               return n
-
--- Unindented lists are legal, but they can't use '*' bullets.
--- We return n to maintain compatibility with the generic listItem.
-bullets :: Bool -> String
-bullets unindented = if unindented then "+-" else "*+-"
+orderedList = try $ do
+  indent <- lookAhead orderedListStart
+  fmap (B.orderedList . compactify) . sequence
+    <$> many1 (listItem (orderedListStart `indented` indent))
 
 definitionListItem :: PandocMonad m
                    => OrgParser m Int
                    -> OrgParser m (F (Inlines, [Blocks]))
-definitionListItem parseMarkerGetLength = try $ do
-  markerLength <- parseMarkerGetLength
+definitionListItem parseIndentedMarker = try $ do
+  markerLength <- parseIndentedMarker
   term <- manyTill (noneOf "\n\r") (try definitionMarker)
   line1 <- anyLineNewline
   blank <- option "" ("\n" <$ blankline)
@@ -801,13 +819,12 @@ definitionListItem parseMarkerGetLength = try $ do
    definitionMarker =
      spaceChar *> string "::" <* (spaceChar <|> lookAhead newline)
 
-
--- parse raw text for one list item, excluding start marker and continuations
+-- | parse raw text for one list item
 listItem :: PandocMonad m
          => OrgParser m Int
          -> OrgParser m (F Blocks)
-listItem start = try . withContext ListItemState $ do
-  markerLength <- try start
+listItem parseIndentedMarker = try . withContext ListItemState $ do
+  markerLength <- try parseIndentedMarker
   firstLine <- anyLineNewline
   blank <- option "" ("\n" <$ blankline)
   rest <- concat <$> many (listContinuation markerLength)
@@ -817,9 +834,9 @@ listItem start = try . withContext ListItemState $ do
 -- Note: nested lists are parsed as continuations.
 listContinuation :: Monad m => Int
                  -> OrgParser m String
-listContinuation markerLength = try $
+listContinuation markerLength = try $ do
   notFollowedBy' blankline
-  *> (mappend <$> (concat <$> many1 listLine)
-              <*> many blankline)
+  mappend <$> (concat <$> many1 listLine)
+          <*> many blankline
  where
    listLine = try $ indentWith markerLength *> anyLineNewline

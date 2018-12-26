@@ -4,11 +4,13 @@ import Data.Text (unpack)
 import Test.Tasty
 import Tests.Helpers
 import Text.Pandoc
-import Text.Pandoc.Arbitrary()
+import Text.Pandoc.Arbitrary ()
 import Text.Pandoc.Builder
 
 muse :: (ToPandoc a) => a -> String
-muse = museWithOpts def{ writerWrapText = WrapNone }
+muse = museWithOpts def{ writerWrapText = WrapNone,
+                         writerExtensions = extensionsFromList [Ext_amuse,
+                                                                Ext_auto_identifiers] }
 
 museWithOpts :: (ToPandoc a) => WriterOptions -> a -> String
 museWithOpts opts = unpack . purely (writeMuse opts) . toPandoc
@@ -92,6 +94,88 @@ tests = [ testGroup "block elements"
                                               , " second definition :: second description"
                                               , " third definition :: third description"
                                               ]
+              , "definition list with multiple descriptions" =:
+                definitionList [ (text "first definition", [plain $ text "first description"
+                                                           ,plain $ text "second description"])
+                               , (text "second definition", [plain $ text "third description"])
+                               ]
+                =?> unlines [ " first definition :: first description"
+                            , "                  :: second description"
+                            , " second definition :: third description"
+                            ]
+              ]
+            -- Test that lists of the same type and style are separated with two blanklines
+            , testGroup "sequential lists"
+              [ "bullet lists" =:
+                bulletList [ para $ text "First"
+                           , para $ text "Second"
+                           , para $ text "Third"
+                           ] <>
+                bulletList [ para $ text "Fourth"
+                           , para $ text "Fifth"
+                           ] =?>
+                unlines [ " - First"
+                        , " - Second"
+                        , " - Third"
+                        , ""
+                        , ""
+                        , " - Fourth"
+                        , " - Fifth"
+                        ]
+              , "ordered lists of the same style" =:
+                orderedListWith (1, UpperRoman, DefaultDelim) [ para $ text "First"
+                                                              , para $ text "Second"
+                                                              ] <>
+                orderedListWith (1, UpperRoman, DefaultDelim) [ para $ text "Third"
+                                                              , para $ text "Fourth"
+                                                              ] =?>
+                unlines [ " I.  First"
+                        , " II. Second"
+                        , ""
+                        , ""
+                        , " I.  Third"
+                        , " II. Fourth"
+                        ]
+              , "ordered lists with equal styles" =:
+                orderedList [ para $ text "First"
+                            , para $ text "Second"
+                            ] <>
+                orderedListWith (1, Decimal, DefaultDelim) [ para $ text "Third"
+                                                           , para $ text "Fourth"
+                                                           ] =?>
+                unlines [ " 1. First"
+                        , " 2. Second"
+                        , ""
+                        , ""
+                        , " 1. Third"
+                        , " 2. Fourth"
+                        ]
+              , "bullet and ordered lists" =:
+                bulletList [ para $ text "First"
+                           , para $ text "Second"
+                           ] <>
+                orderedListWith (1, UpperRoman, DefaultDelim) [ para $ text "Third"
+                                                              , para $ text "Fourth"
+                                                              ] =?>
+                unlines [ " - First"
+                        , " - Second"
+                        , ""
+                        , " I.  Third"
+                        , " II. Fourth"
+                        ]
+              , "different style ordered lists" =:
+                orderedListWith (1, UpperRoman, DefaultDelim) [ para $ text "First"
+                                                              , para $ text "Second"
+                                                              ] <>
+                orderedListWith (1, Decimal, DefaultDelim) [ para $ text "Third"
+                                                           , para $ text "Fourth"
+                                                           ] =?>
+                unlines [ " I.  First"
+                        , " II. Second"
+                        , ""
+                        , " 1. Third"
+                        , " 2. Fourth"
+                        ]
               ]
             , testGroup "nested lists"
               [ "nested ordered list" =: orderedList [ plain $ text "First outer"
@@ -122,8 +206,8 @@ tests = [ testGroup "block elements"
                                                   ]
               , "nested definition lists" =: definitionList [ (text "first definition", [plain $ text "first description"])
                                                             , (text "second definition",
-                                                               [ plain (text "second description")
-                                                               , definitionList [ ( text "first inner definition"
+                                                               [ plain (text "second description") <>
+                                                                 definitionList [ ( text "first inner definition"
                                                                                   , [plain $ text "first inner description"])
                                                                                 , ( text "second inner definition"
                                                                                   , [plain $ text "second inner description"])
@@ -133,8 +217,8 @@ tests = [ testGroup "block elements"
                                                             ]
                                           =?> unlines [ " first definition :: first description"
                                                       , " second definition :: second description"
-                                                      , "                       first inner definition :: first inner description"
-                                                      , "                       second inner definition :: second inner description"
+                                                      , "                      first inner definition :: first inner description"
+                                                      , "                      second inner definition :: second inner description"
                                                       ]
               ]
             -- Check that list is intended with one space even inside a quote
@@ -159,8 +243,15 @@ tests = [ testGroup "block elements"
                       , ""
                       , "*** Third level"
                       ]
+            , "heading with ID" =:
+               headerWith ("bar", [], []) 2 (text "Foo") =?>
+               unlines [ "** Foo"
+                       , "#bar"
+                      ]
             ]
           , "horizontal rule" =: horizontalRule =?> "----"
+          , "escape horizontal rule" =: para (text "----") =?> "<verbatim>----</verbatim>"
+          , "escape nonbreaking space" =: para (text "~~") =?> "<verbatim>~~</verbatim>"
           , testGroup "tables"
             [ "table without header" =:
               let rows = [[para $ text "Para 1.1", para $ text "Para 1.2"]
@@ -192,7 +283,9 @@ tests = [ testGroup "block elements"
                           , " |+ Table 1 +|"
                           ]
             ]
-          -- Div is trivial
+          , "div with bullet list" =:
+            divWith nullAttr (bulletList [para $ text "foo"]) =?>
+            unlines [ " - foo" ] -- Making sure bullets are indented
           -- Null is trivial
           ]
         , testGroup "inline elements"
@@ -203,6 +296,8 @@ tests = [ testGroup "block elements"
                =?> "<verbatim>foo<</verbatim><verbatim>/verbatim>bar</verbatim>"
             , "escape pipe to avoid accidental tables" =: str "foo | bar"
                =?> "<verbatim>foo | bar</verbatim>"
+            , "escape hash to avoid accidental anchors" =: text "#foo bar"
+              =?> "<verbatim>#foo</verbatim> bar"
             , "escape definition list markers" =: str "::" =?> "<verbatim>::</verbatim>"
             -- We don't want colons to be escaped if they can't be confused
             -- with definition list item markers.
@@ -216,13 +311,14 @@ tests = [ testGroup "block elements"
           , "superscript" =: superscript (text "foo") =?> "<sup>foo</sup>"
           , "subscript" =: subscript (text "foo") =?> "<sub>foo</sub>"
           , "smallcaps" =: smallcaps (text "foo") =?> "foo"
-          , "single quoted" =: singleQuoted (text "foo") =?> "'foo'"
-          , "double quoted" =: doubleQuoted (text "foo") =?> "\"foo\""
+          , "single quoted" =: singleQuoted (text "foo") =?> "‘foo’"
+          , "double quoted" =: doubleQuoted (text "foo") =?> "“foo”"
           -- Cite is trivial
           , testGroup "code"
             [ "simple" =: code "foo" =?> "<code>foo</code>"
-            , "escape lightweight markup" =: code "foo = bar" =?> "<code><verbatim>foo = bar</verbatim></code>"
-            , "escape tag" =: code "<code>foo = bar</code> baz" =?> "<code><verbatim><code>foo = bar</code> baz</verbatim></code>"
+            , "escape tag" =: code "<code>foo = bar</code> baz" =?> "<code><code>foo = bar<</code><code>/code> baz</code>"
+            , "normalization with attributes" =: codeWith ("",["haskell"],[]) "foo" <> code "bar" =?> "<code>foobar</code>"
+            , "normalization" =: code "</co" <> code "de>" =?> "<code><</code><code>/code></code>"
             ]
           , testGroup "spaces"
             [ "space" =: text "a" <> space <> text "b" =?> "a b"
@@ -234,7 +330,8 @@ tests = [ testGroup "block elements"
             ]
           , testGroup "math"
             [ "inline math" =: math "2^3" =?> "2<sup>3</sup>"
-            , "display math" =: displayMath "2^3" =?> "<verse>2<sup>3</sup></verse>"
+            , "display math" =: displayMath "2^3" =?> "2<sup>3</sup>"
+            , "multiple letters in inline math" =: math "abc" =?> "<em>abc</em>"
             ]
           , "raw inline"
             =: rawInline "html" "<mark>marked text</mark>"
@@ -254,6 +351,9 @@ tests = [ testGroup "block elements"
                                                   =?> "[[URL:1.png]]"
             ]
           , "image" =: image "image.png" "Image 1" (str "") =?> "[[image.png][Image 1]]"
+          , "image with width" =:
+            imageWith ("", [], [("width", "60%")]) "image.png" "Image" (str "") =?>
+            "[[image.png 60][Image]]"
           , "note" =: note (plain (text "Foo"))
                    =?> unlines [ "[1]"
                                , ""
@@ -270,7 +370,7 @@ tests = [ testGroup "block elements"
                     "<em>foo</em>bar"
             , "emph quoted" =:
                 para (doubleQuoted (emph (text "foo"))) =?>
-                    "\"<em>foo</em>\""
+                    "“<em>foo</em>”"
             , "strong word before" =:
                 para (text "foo" <> strong (text "bar")) =?>
                     "foo<strong>bar</strong>"
@@ -279,7 +379,7 @@ tests = [ testGroup "block elements"
                     "<strong>foo</strong>bar"
             , "strong quoted" =:
                 para (singleQuoted (strong (text "foo"))) =?>
-                    "'<strong>foo</strong>'"
+                    "‘<strong>foo</strong>’"
             ]
          ]
        ]

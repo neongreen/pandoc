@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-
-Copyright (C) 2013-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2013-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.OPML
-   Copyright   : Copyright (C) 2013-2017 John MacFarlane
+   Copyright   : Copyright (C) 2013-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -56,9 +56,9 @@ writeOPML opts (Pandoc meta blocks) = do
       meta' = B.setMeta "date" (B.str $ convertDate $ docDate meta) meta
   metadata <- metaToJSON opts
               (writeMarkdown def . Pandoc nullMeta)
-              (\ils -> T.stripEnd <$> (writeMarkdown def $ Pandoc nullMeta [Plain ils]))
+              (\ils -> T.stripEnd <$> writeMarkdown def (Pandoc nullMeta [Plain ils]))
               meta'
-  main <- (render colwidth . vcat) <$> (mapM (elementToOPML opts) elements)
+  main <- (render colwidth . vcat) <$> mapM (elementToOPML opts) elements
   let context = defField "body" main metadata
   case writerTemplate opts of
        Nothing  -> return main
@@ -67,7 +67,7 @@ writeOPML opts (Pandoc meta blocks) = do
 
 writeHtmlInlines :: PandocMonad m => [Inline] -> m Text
 writeHtmlInlines ils =
-  T.strip <$> (writeHtml5String def $ Pandoc nullMeta [Plain ils])
+  T.strip <$> writeHtml5String def (Pandoc nullMeta [Plain ils])
 
 -- date format: RFC 822: Thu, 14 Jul 2005 23:41:05 GMT
 showDateTimeRFC822 :: UTCTime -> String
@@ -80,7 +80,7 @@ convertDate ils = maybe "" showDateTimeRFC822 $
 #else
   parseTime
 #endif
-  defaultTimeLocale "%F" =<< (normalizeDate $ stringify ils)
+  defaultTimeLocale "%F" =<< normalizeDate (stringify ils)
 
 -- | Convert an Element to OPML.
 elementToOPML :: PandocMonad m => WriterOptions -> Element -> m Doc
@@ -100,7 +100,7 @@ elementToOPML opts (Sec _ _num _ title elements) = do
         then return mempty
         else do blks <- mapM fromBlk blocks
                 writeMarkdown def $ Pandoc nullMeta blks
-  let attrs = [("text", unpack htmlIls)] ++
+  let attrs = ("text", unpack htmlIls) :
               [("_note", unpack md) | not (null blocks)]
   o <- mapM (elementToOPML opts) rest
   return $ inTags True "outline" attrs $ vcat o

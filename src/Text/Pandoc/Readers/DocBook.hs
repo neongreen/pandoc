@@ -1,23 +1,22 @@
+{-# LANGUAGE ExplicitForAll #-}
 module Text.Pandoc.Readers.DocBook ( readDocBook ) where
-import Data.Char (toUpper)
-import Text.Pandoc.Shared (safeRead, crFilter)
-import Text.Pandoc.Options
-import Text.Pandoc.Definition
-import Text.Pandoc.Builder
-import Text.XML.Light
-import Text.HTML.TagSoup.Entity (lookupEntity)
-import Data.Either (rights)
-import Data.Generics
-import Data.Char (isSpace)
 import Control.Monad.State.Strict
+import Data.Char (isSpace, toUpper)
+import Data.Default
+import Data.Either (rights)
+import Data.Foldable (asum)
+import Data.Generics
 import Data.List (intersperse)
 import Data.Maybe (fromMaybe)
-import Text.TeXMath (readMathML, writeTeX)
-import Data.Default
-import Data.Foldable (asum)
-import Text.Pandoc.Class (PandocMonad)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Text.HTML.TagSoup.Entity (lookupEntity)
+import Text.Pandoc.Builder
+import Text.Pandoc.Class (PandocMonad)
+import Text.Pandoc.Options
+import Text.Pandoc.Shared (crFilter, safeRead)
+import Text.TeXMath (readMathML, writeTeX)
+import Text.XML.Light
 
 {-
 
@@ -51,7 +50,7 @@ List of all DocBook tags, with [x] indicating implemented,
 [x] author - The name of an individual author
 [ ] authorblurb - A short description or note about an author
 [x] authorgroup - Wrapper for author information when a document has
-    multiple authors or collabarators
+    multiple authors or collaborators
 [x] authorinitials - The initials or other short identifier for an author
 [o] beginpage - The location of a page break in a print version of the document
 [ ] bibliocoverage - The spatial or temporal coverage of a document
@@ -528,7 +527,7 @@ readDocBook :: PandocMonad m => ReaderOptions -> Text -> m Pandoc
 readDocBook _ inp = do
   let tree = normalizeTree . parseXML . handleInstructions
                $ T.unpack $ crFilter inp
-  (bs, st') <- flip runStateT (def{ dbContent = tree }) $ mapM parseBlock $ tree
+  (bs, st') <- flip runStateT (def{ dbContent = tree }) $ mapM parseBlock tree
   return $ Pandoc (dbMeta st') (toList . mconcat $ bs)
 
 -- We treat <?asciidoc-br?> specially (issue #1236), converting it
@@ -539,12 +538,12 @@ handleInstructions ('<':'?':'a':'s':'c':'i':'i':'d':'o':'c':'-':'b':'r':'?':'>':
 handleInstructions xs = case break (=='<') xs of
                              (ys, [])     -> ys
                              ([], '<':zs) -> '<' : handleInstructions zs
-                             (ys, zs) -> ys ++ handleInstructions zs
+                             (ys, zs)     -> ys ++ handleInstructions zs
 
 getFigure :: PandocMonad m => Element -> DB m Blocks
 getFigure e = do
   tit <- case filterChild (named "title") e of
-              Just t -> getInlines t
+              Just t  -> getInlines t
               Nothing -> return mempty
   modify $ \st -> st{ dbFigureTitle = tit }
   res <- getBlocks e
@@ -567,14 +566,12 @@ normalizeTree = everywhere (mkT go)
         go xs = xs
 
 convertEntity :: String -> String
-convertEntity e = maybe (map toUpper e) id (lookupEntity e)
+convertEntity e = Data.Maybe.fromMaybe (map toUpper e) (lookupEntity e)
 
 -- convenience function to get an attribute value, defaulting to ""
 attrValue :: String -> Element -> String
 attrValue attr elt =
-  case lookupAttrBy (\x -> qName x == attr) (elAttribs elt) of
-    Just z  -> z
-    Nothing -> ""
+  fromMaybe "" (lookupAttrBy (\x -> qName x == attr) (elAttribs elt))
 
 -- convenience function
 named :: String -> Element -> Bool
@@ -654,15 +651,17 @@ getMediaobject e = do
                                             || named "textobject" x
                                             || named "alt" x) el of
                         Nothing -> return mempty
-                        Just z  -> mconcat <$> (mapM parseInline $ elContent z)
+                        Just z  -> mconcat <$>
+                                         mapM parseInline (elContent z)
   figTitle <- gets dbFigureTitle
   let (caption, title) = if isNull figTitle
                             then (getCaption e, "")
                             else (return figTitle, "fig:")
-  liftM (imageWith attr imageUrl title) caption
+  fmap (imageWith attr imageUrl title) caption
 
 getBlocks :: PandocMonad m => Element -> DB m Blocks
-getBlocks e =  mconcat <$> (mapM parseBlock $ elContent e)
+getBlocks e =  mconcat <$>
+                 mapM parseBlock (elContent e)
 
 
 parseBlock :: PandocMonad m => Content -> DB m Blocks
@@ -798,15 +797,16 @@ parseBlock (Elem e) =
                     return $ p <> b <> x
          codeBlockWithLang = do
            let classes' = case attrValue "language" e of
-                                ""   -> []
-                                x    -> [x]
+                                "" -> []
+                                x  -> [x]
            return $ codeBlockWith (attrValue "id" e, classes', [])
                   $ trimNl $ strContentRecursive e
          parseBlockquote = do
             attrib <- case filterChild (named "attribution") e of
                              Nothing  -> return mempty
                              Just z   -> (para . (str "— " <>) . mconcat)
-                                         <$> (mapM parseInline $ elContent z)
+                                         <$>
+                                              mapM parseInline (elContent z)
             contents <- getBlocks e
             return $ blockQuote (contents <> attrib)
          listitems = mapM getBlocks $ filterChildren (named "listitem") e
@@ -871,11 +871,11 @@ parseBlock (Elem e) =
                                                       || x == '.') w
                                                 Nothing -> 0 :: Double
                       let numrows = case bodyrows of
-                                         []   -> 0
-                                         xs   -> maximum $ map length xs
+                                         [] -> 0
+                                         xs -> maximum $ map length xs
                       let aligns = case colspecs of
-                                     []  -> replicate numrows AlignDefault
-                                     cs  -> map toAlignment cs
+                                     [] -> replicate numrows AlignDefault
+                                     cs -> map toAlignment cs
                       let widths = case colspecs of
                                      []  -> replicate numrows 0
                                      cs  -> let ws = map toWidth cs
@@ -895,7 +895,7 @@ parseBlock (Elem e) =
                      headerText <- case filterChild (named "title") e `mplus`
                                         (filterChild (named "info") e >>=
                                             filterChild (named "title")) of
-                                      Just t -> getInlines t
+                                      Just t  -> getInlines t
                                       Nothing -> return mempty
                      modify $ \st -> st{ dbSectionLevel = n }
                      b <- getBlocks e
@@ -906,7 +906,8 @@ parseBlock (Elem e) =
          metaBlock = acceptingMetadata (getBlocks e) >> return mempty
 
 getInlines :: PandocMonad m => Element -> DB m Inlines
-getInlines e' = (trimInlines . mconcat) <$> (mapM parseInline $ elContent e')
+getInlines e' = (trimInlines . mconcat) <$>
+                 mapM parseInline (elContent e')
 
 strContentRecursive :: Element -> String
 strContentRecursive = strContent .
@@ -919,7 +920,7 @@ elementToStr x = x
 parseInline :: PandocMonad m => Content -> DB m Inlines
 parseInline (Text (CData _ s _)) = return $ text s
 parseInline (CRef ref) =
-  return $ maybe (text $ map toUpper ref) (text) $ lookupEntity ref
+  return $ maybe (text $ map toUpper ref) text $ lookupEntity ref
 parseInline (Elem e) =
   case qName (elName e) of
         "equation" -> equation displayMath
@@ -960,8 +961,10 @@ parseInline (Elem e) =
         "userinput" -> codeWithLang
         "varargs" -> return $ code "(...)"
         "keycap" -> return (str $ strContent e)
-        "keycombo" -> keycombo <$> (mapM parseInline $ elContent e)
-        "menuchoice" -> menuchoice <$> (mapM parseInline $
+        "keycombo" -> keycombo <$>
+                         mapM parseInline (elContent e)
+        "menuchoice" -> menuchoice <$>
+                         mapM parseInline (
                                         filter isGuiMenu $ elContent e)
         "xref" -> do
             content <- dbContent <$> get
@@ -980,17 +983,18 @@ parseInline (Elem e) =
              ils <- innerInlines
              let href = case findAttr (QName "href" (Just "http://www.w3.org/1999/xlink") Nothing) e of
                                Just h -> h
-                               _      -> ('#' : attrValue "linkend" e)
+                               _      -> '#' : attrValue "linkend" e
              let ils' = if ils == mempty then str href else ils
              let attr = (attrValue "id" e, words $ attrValue "role" e, [])
              return $ linkWith attr href "" ils'
         "foreignphrase" -> emph <$> innerInlines
         "emphasis" -> case attrValue "role" e of
-                             "bold"   -> strong <$> innerInlines
-                             "strong" -> strong <$> innerInlines
+                             "bold"          -> strong <$> innerInlines
+                             "strong"        -> strong <$> innerInlines
                              "strikethrough" -> strikeout <$> innerInlines
-                             _        -> emph <$> innerInlines
-        "footnote" -> (note . mconcat) <$> (mapM parseBlock $ elContent e)
+                             _               -> emph <$> innerInlines
+        "footnote" -> (note . mconcat) <$>
+                         mapM parseBlock (elContent e)
         "title" -> return mempty
         "affiliation" -> return mempty
         -- Note: this isn't a real docbook tag; it's what we convert
@@ -999,7 +1003,7 @@ parseInline (Elem e) =
         "br" -> return linebreak
         _          -> innerInlines
    where innerInlines = (trimInlines . mconcat) <$>
-                          (mapM parseInline $ elContent e)
+                          mapM parseInline (elContent e)
          equation constructor = return $ mconcat $
            map (constructor . writeTeX)
            $ rights

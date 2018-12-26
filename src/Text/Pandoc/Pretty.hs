@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP                        #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-
-Copyright (C) 2010-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2010-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111(-1)307  USA
 
 {- |
    Module      : Text.Pandoc.Pretty
-   Copyright   : Copyright (C) 2010-2017 John MacFarlane
+   Copyright   : Copyright (C) 2010-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -77,6 +77,7 @@ module Text.Pandoc.Pretty (
      )
 
 where
+import Control.Monad
 import Control.Monad.State.Strict
 import Data.Char (isSpace)
 import Data.Foldable (toList)
@@ -144,11 +145,10 @@ hcat = mconcat
 -- between them.
 infixr 6 <+>
 (<+>) :: Doc -> Doc -> Doc
-(<+>) x y = if isEmpty x
-               then y
-               else if isEmpty y
-                    then x
-                    else x <> space <> y
+(<+>) x y
+  | isEmpty x = y
+  | isEmpty y = x
+  | otherwise = x <> space <> y
 
 -- | Same as 'cat', but putting breakable spaces between the
 -- 'Doc's.
@@ -158,20 +158,18 @@ hsep = foldr (<+>) empty
 infixr 5 $$
 -- | @a $$ b@ puts @a@ above @b@.
 ($$) :: Doc -> Doc -> Doc
-($$) x y = if isEmpty x
-              then y
-              else if isEmpty y
-                   then x
-                   else x <> cr <> y
+($$) x y
+  | isEmpty x = y
+  | isEmpty y = x
+  | otherwise = x <> cr <> y
 
 infixr 5 $+$
 -- | @a $+$ b@ puts @a@ above @b@, with a blank line between.
 ($+$) :: Doc -> Doc -> Doc
-($+$) x y = if isEmpty x
-               then y
-               else if isEmpty y
-                    then x
-                    else x <> blankline <> y
+($+$) x y
+  | isEmpty x = y
+  | isEmpty y = x
+  | otherwise = x <> blankline <> y
 
 -- | List version of '$$'.
 vcat :: [Doc] -> Doc
@@ -217,9 +215,9 @@ outp off s | off < 0 = do  -- offset < 0 means newline characters
 outp off s = do           -- offset >= 0 (0 might be combining char)
   st' <- get
   let pref = prefix st'
-  when (column st' == 0 && usePrefix st' && not (null pref)) $ do
+  when (column st' == 0 && usePrefix st' && not (null pref)) $
     modify $ \st -> st{ output = fromString pref : output st
-                      , column = column st + realLength pref }
+                    , column = column st + realLength pref }
   modify $ \st -> st{ output = fromString s : output st
                     , column = column st + off
                     , newlines = 0 }
@@ -328,9 +326,7 @@ renderList (BreakingSpace : xs) = do
 
 renderList (AfterBreak s : xs) = do
   st <- get
-  if newlines st > 0
-     then outp (realLength s) s
-     else return ()
+  when (newlines st > 0) $ outp (realLength s) s
   renderList xs
 
 renderList (Block i1 s1 : Block i2 s2  : xs) =
@@ -361,7 +357,7 @@ mergeBlocks addSpace (IsBlock w1 lns1) (IsBlock w2 lns2) =
                                        | otherwise -> (lns1, lns2)
           pad n s = s ++ replicate (n - realLength s) ' '
           sp "" = ""
-          sp xs = if addSpace then (' ' : xs) else xs
+          sp xs = if addSpace then ' ' : xs else xs
 
 offsetOf :: D -> Int
 offsetOf (Text o _)    = o
@@ -398,8 +394,8 @@ cr = Doc $ singleton CarriageReturn
 blankline :: Doc
 blankline = Doc $ singleton (BlankLines 1)
 
--- | Inserts a blank lines unless they exists already.
--- (@blanklines m <> blanklines n@ has the same effect as @blankline (max m n)@.
+-- | Inserts blank lines unless they exist already.
+-- (@blanklines m <> blanklines n@ has the same effect as @blanklines (max m n)@.
 blanklines :: Int -> Doc
 blanklines n = Doc $ singleton (BlankLines n)
 

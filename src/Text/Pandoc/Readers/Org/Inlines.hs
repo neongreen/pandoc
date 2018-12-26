@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2014-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+Copyright (C) 2014-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.Org.Inlines
-   Copyright   : Copyright (C) 2014-2017 Albert Krewinkel
+   Copyright   : Copyright (C) 2014-2018 Albert Krewinkel
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -45,6 +45,7 @@ import Text.Pandoc.Class (PandocMonad)
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Readers.LaTeX (inlineCommand, rawLaTeXInline)
+import Text.Pandoc.Shared (underlineSpan)
 import Text.TeXMath (DisplayType (..), readTeX, writePandoc)
 import qualified Text.TeXMath.Readers.MathML.EntityMap as MathMLEntityMap
 
@@ -158,7 +159,8 @@ endline = try $ do
   decEmphasisNewlinesCount
   guard =<< newlinesCountWithinLimits
   updateLastPreCharPos
-  returnF B.softbreak
+  useHardBreaks <- exportPreserveBreaks . orgStateExportSettings <$> getState
+  returnF (if useHardBreaks then B.linebreak else B.softbreak)
 
 
 --
@@ -571,9 +573,8 @@ strong    = fmap B.strong       <$> emphasisBetween '*'
 strikeout :: PandocMonad m => OrgParser m (F Inlines)
 strikeout = fmap B.strikeout    <$> emphasisBetween '+'
 
--- There is no underline, so we use strong instead.
 underline :: PandocMonad m => OrgParser m (F Inlines)
-underline = fmap B.strong       <$> emphasisBetween '_'
+underline = fmap underlineSpan  <$> emphasisBetween '_'
 
 verbatim  :: PandocMonad m => OrgParser m (F Inlines)
 verbatim  = return . B.code     <$> verbatimBetween '='
@@ -602,6 +603,8 @@ updatePositions :: PandocMonad m
                 => Char
                 -> OrgParser m Char
 updatePositions c = do
+  st <- getState
+  let emphasisPreChars = orgStateEmphasisPreChars st
   when (c `elem` emphasisPreChars) updateLastPreCharPos
   when (c `elem` emphasisForbiddenBorderChars) updateLastForbiddenCharPos
   return c
@@ -680,8 +683,10 @@ emphasisEnd c = try $ do
   updateLastStrPos
   popInlineCharStack
   return c
- where acceptablePostChars =
-           surroundingEmphasisChar >>= \x -> oneOf (x ++ emphasisPostChars)
+ where
+  acceptablePostChars = do
+    emphasisPostChars <- orgStateEmphasisPostChars <$> getState
+    surroundingEmphasisChar >>= \x -> oneOf (x ++ emphasisPostChars)
 
 mathStart :: PandocMonad m => Char -> OrgParser m Char
 mathStart c = try $
@@ -733,17 +738,9 @@ many1TillNOrLessNewlines n p end = try $
 -- here (see, e.g., the Emacs Lisp variable `org-emphasis-regexp-components`
 -- for details).
 
--- | Chars allowed to occur before emphasis (spaces and newlines are ok, too)
-emphasisPreChars :: [Char]
-emphasisPreChars = "\t \"'({"
-
--- | Chars allowed at after emphasis
-emphasisPostChars :: [Char]
-emphasisPostChars = "\t\n !\"'),-.:;?\\}["
-
 -- | Chars not allowed at the (inner) border of emphasis
 emphasisForbiddenBorderChars :: [Char]
-emphasisForbiddenBorderChars = "\t\n\r \"',"
+emphasisForbiddenBorderChars = "\t\n\r "
 
 -- | The maximum number of newlines within
 emphasisAllowedNewlines :: Int

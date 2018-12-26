@@ -1,8 +1,12 @@
-{-# LANGUAGE DeriveDataTypeable, CPP, MultiParamTypeClasses,
-    FlexibleContexts, ScopedTypeVariables, PatternGuards,
-    ViewPatterns #-}
+{-# LANGUAGE CPP                   #-}
+{-# LANGUAGE DeriveDataTypeable    #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE ViewPatterns          #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +25,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Shared
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -68,19 +72,16 @@ module Text.Pandoc.Shared (
                      inlineListToIdentifier,
                      isHeaderBlock,
                      headerShift,
+                     stripEmptyParagraphs,
                      isTightList,
                      addMetaField,
                      makeMeta,
                      eastAsianLineBreakFilter,
+                     underlineSpan,
                      -- * TagSoup HTML handling
                      renderTags',
                      -- * File handling
                      inDirectory,
-                     getDefaultReferenceDocx,
-                     getDefaultReferenceODT,
-                     readDataFile,
-                     readDataFileUTF8,
-                     openURL,
                      collapseFilePath,
                      filteredFilesFromArchive,
                      -- * URI handling
@@ -90,6 +91,7 @@ module Text.Pandoc.Shared (
                      mapLeft,
                      -- * for squashing blocks
                      blocksToInlines,
+                     blocksToInlines',
                      -- * Safe read
                      safeRead,
                      -- * Temp directory
@@ -98,64 +100,37 @@ module Text.Pandoc.Shared (
                      pandocVersion
                     ) where
 
-import Text.Pandoc.Definition
-import Text.Pandoc.Walk
-import Text.Pandoc.Builder (Inlines, Blocks, ToMetaValue(..))
-import qualified Text.Pandoc.Builder as B
-import qualified Text.Pandoc.UTF8 as UTF8
-import Data.Char ( toLower, isLower, isUpper, isAlpha,
-                   isLetter, isDigit, isSpace )
-import Data.List ( find, stripPrefix, intercalate )
-import Data.Maybe (mapMaybe)
-import Data.Version ( showVersion )
-import qualified Data.Map as M
-import Network.URI ( URI(uriScheme), escapeURIString, unEscapeString, parseURI )
-import qualified Data.Set as Set
-import System.Directory
-import System.FilePath (splitDirectories, isPathSeparator)
-import qualified System.FilePath.Posix as Posix
-import Text.Pandoc.MIME (MimeType)
-import Text.Pandoc.Error (PandocError(..))
-import System.FilePath ( (</>) )
-import Data.Generics (Typeable, Data)
-import qualified Control.Monad.State.Strict as S
-import qualified Control.Exception as E
-import Control.Monad (msum, unless, MonadPlus(..))
-import Text.Pandoc.Pretty (charWidth)
-import Text.Pandoc.Generic (bottomUp)
-import Text.Pandoc.Compat.Time
-import Data.Time.Clock.POSIX
-import System.IO.Error
-import System.IO.Temp
-import Text.HTML.TagSoup (renderTagsOptions, RenderOptions(..), Tag(..),
-         renderOptions)
-import Data.Monoid ((<>))
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as B8
-import Data.ByteString.Base64 (decodeLenient)
-import Data.Sequence (ViewR(..), ViewL(..), viewl, viewr)
-import qualified Data.Text as T
-import Data.ByteString.Lazy (toChunks, fromChunks)
-import qualified Data.ByteString.Lazy as BL
-import Paths_pandoc (version)
-
 import Codec.Archive.Zip
-
-#ifdef EMBED_DATA_FILES
-import Text.Pandoc.Data (dataFiles)
-#else
-import Paths_pandoc (getDataFileName)
-#endif
-import Network.HTTP.Client (httpLbs, responseBody, responseHeaders,
-                            Request(port,host,requestHeaders),
-                            HttpException)
-import Network.HTTP.Client (parseRequest)
-import Network.HTTP.Client (newManager)
-import Network.HTTP.Client.Internal (addProxy)
-import Network.HTTP.Client.TLS (tlsManagerSettings)
-import System.Environment (getEnv)
-import Network.HTTP.Types.Header ( hContentType, hUserAgent)
-import Network (withSocketsDo)
+import qualified Control.Exception as E
+import Control.Monad (MonadPlus (..), msum, unless)
+import qualified Control.Monad.State.Strict as S
+import qualified Data.ByteString.Lazy as BL
+import Data.Char (isAlpha, isDigit, isLetter, isLower, isSpace, isUpper,
+                  toLower)
+import Data.Data (Data, Typeable)
+import Data.List (find, intercalate, intersperse, stripPrefix)
+import qualified Data.Map as M
+import Data.Maybe (mapMaybe)
+import Data.Monoid ((<>))
+import Data.Sequence (ViewL (..), ViewR (..), viewl, viewr)
+import qualified Data.Set as Set
+import qualified Data.Text as T
+import Data.Version (showVersion)
+import Network.URI (URI (uriScheme), escapeURIString, parseURI)
+import Paths_pandoc (version)
+import System.Directory
+import System.FilePath (isPathSeparator, splitDirectories)
+import qualified System.FilePath.Posix as Posix
+import System.IO.Temp
+import Text.HTML.TagSoup (RenderOptions (..), Tag (..), renderOptions,
+                          renderTagsOptions)
+import Text.Pandoc.Builder (Blocks, Inlines, ToMetaValue (..))
+import qualified Text.Pandoc.Builder as B
+import Text.Pandoc.Compat.Time
+import Text.Pandoc.Definition
+import Text.Pandoc.Generic (bottomUp)
+import Text.Pandoc.Pretty (charWidth)
+import Text.Pandoc.Walk
 
 -- | Version number of pandoc library.
 pandocVersion :: String
@@ -171,11 +146,11 @@ splitBy _ [] = []
 splitBy isSep lst =
   let (first, rest) = break isSep lst
       rest'         = dropWhile isSep rest
-  in  first:(splitBy isSep rest')
+  in  first:splitBy isSep rest'
 
 splitByIndices :: [Int] -> [a] -> [[a]]
 splitByIndices [] lst = [lst]
-splitByIndices (x:xs) lst = first:(splitByIndices (map (\y -> y - x)  xs) rest)
+splitByIndices (x:xs) lst = first:splitByIndices (map (\y -> y - x)  xs) rest
   where (first, rest) = splitAt x lst
 
 -- | Split string into chunks divided at specified indices.
@@ -183,7 +158,7 @@ splitStringByIndices :: [Int] -> [Char] -> [[Char]]
 splitStringByIndices [] lst = [lst]
 splitStringByIndices (x:xs) lst =
   let (first, rest) = splitAt' x lst in
-  first : (splitStringByIndices (map (\y -> y - x) xs) rest)
+  first : splitStringByIndices (map (\y -> y - x) xs) rest
 
 splitAt' :: Int -> [Char] -> ([Char],[Char])
 splitAt' _ []          = ([],[])
@@ -222,9 +197,9 @@ backslashEscapes = map (\ch -> (ch, ['\\',ch]))
 escapeStringUsing :: [(Char, String)] -> String -> String
 escapeStringUsing _ [] = ""
 escapeStringUsing escapeTable (x:xs) =
-  case (lookup x escapeTable) of
-       Just str  -> str ++ rest
-       Nothing   -> x:rest
+  case lookup x escapeTable of
+       Just str -> str ++ rest
+       Nothing  -> x:rest
   where rest = escapeStringUsing escapeTable xs
 
 -- | Strip trailing newlines from string.
@@ -246,14 +221,14 @@ trimr = reverse . triml . reverse
 -- | Strip leading and trailing characters from string
 stripFirstAndLast :: String -> String
 stripFirstAndLast str =
-  drop 1 $ take ((length str) - 1) str
+  drop 1 $ take (length str - 1) str
 
 -- | Change CamelCase word to hyphenated lowercase (e.g., camel-case).
 camelCaseToHyphenated :: String -> String
 camelCaseToHyphenated [] = ""
 camelCaseToHyphenated (a:b:rest) | isLower a && isUpper b =
-  a:'-':(toLower b):(camelCaseToHyphenated rest)
-camelCaseToHyphenated (a:rest) = (toLower a):(camelCaseToHyphenated rest)
+  a:'-':toLower b:camelCaseToHyphenated rest
+camelCaseToHyphenated (a:rest) = toLower a:camelCaseToHyphenated rest
 
 -- | Convert number < 4000 to uppercase roman numeral.
 toRomanNumeral :: Int -> String
@@ -310,7 +285,7 @@ normalizeDate s = fmap (formatTime defaultTimeLocale "%F")
   (msum $ map (\fs -> parsetimeWith fs s >>= rejectBadYear) formats :: Maybe Day)
   where rejectBadYear day = case toGregorian day of
           (y, _, _) | y >= 1601 && y <= 9999 -> Just day
-          _ -> Nothing
+          _         -> Nothing
         parsetimeWith =
 #if MIN_VERSION_time(1,5,0)
              parseTimeM True defaultTimeLocale
@@ -318,7 +293,7 @@ normalizeDate s = fmap (formatTime defaultTimeLocale "%F")
              parseTime defaultTimeLocale
 #endif
         formats = ["%x","%m/%d/%Y", "%D","%F", "%d %b %Y",
-                    "%d %B %Y", "%b. %d, %Y", "%B %d, %Y",
+                    "%e %B %Y", "%b. %e, %Y", "%B %e, %Y",
                     "%Y%m%d", "%Y%m", "%Y"]
 
 --
@@ -365,34 +340,41 @@ extractSpaces f is =
 
 -- | Extract inlines, removing formatting.
 removeFormatting :: Walkable Inline a => a -> [Inline]
-removeFormatting = query go . walk deNote
+removeFormatting = query go . walk (deNote . deQuote)
   where go :: Inline -> [Inline]
-        go (Str xs)     = [Str xs]
-        go Space        = [Space]
-        go SoftBreak    = [SoftBreak]
-        go (Code _ x)   = [Str x]
-        go (Math _ x)   = [Str x]
-        go LineBreak    = [Space]
-        go _            = []
+        go (Str xs)   = [Str xs]
+        go Space      = [Space]
+        go SoftBreak  = [SoftBreak]
+        go (Code _ x) = [Str x]
+        go (Math _ x) = [Str x]
+        go LineBreak  = [Space]
+        go _          = []
 
 deNote :: Inline -> Inline
 deNote (Note _) = Str ""
 deNote x        = x
 
+deQuote :: Inline -> Inline
+deQuote (Quoted SingleQuote xs) =
+  Span ("",[],[]) (Str "\8216" : xs ++ [Str "\8217"])
+deQuote (Quoted DoubleQuote xs) =
+  Span ("",[],[]) (Str "\8220" : xs ++ [Str "\8221"])
+deQuote x = x
+
 -- | Convert pandoc structure to a string with formatting removed.
 -- Footnotes are skipped (since we don't want their contents in link
 -- labels).
 stringify :: Walkable Inline a => a -> String
-stringify = query go . walk deNote
+stringify = query go . walk (deNote . deQuote)
   where go :: Inline -> [Char]
-        go Space = " "
-        go SoftBreak = " "
-        go (Str x) = x
-        go (Code _ x) = x
-        go (Math _ x) = x
+        go Space                                       = " "
+        go SoftBreak                                   = " "
+        go (Str x)                                     = x
+        go (Code _ x)                                  = x
+        go (Math _ x)                                  = x
         go (RawInline (Format "html") ('<':'b':'r':_)) = " " -- see #2105
-        go LineBreak = " "
-        go _ = ""
+        go LineBreak                                   = " "
+        go _                                           = ""
 
 -- | Bring all regular text in a pandoc structure to uppercase.
 --
@@ -464,7 +446,7 @@ instance Walkable Inline Element where
     ils' <- walkM f ils
     elts' <- walkM f elts
     return $ Sec lev nums attr ils' elts'
-  query f (Blk x) = query f x
+  query f (Blk x)              = query f x
   query f (Sec _ _ _ ils elts) = query f ils <> query f elts
 
 instance Walkable Block Element where
@@ -475,7 +457,7 @@ instance Walkable Block Element where
     ils' <- walkM f ils
     elts' <- walkM f elts
     return $ Sec lev nums attr ils' elts'
-  query f (Blk x) = query f x
+  query f (Blk x)              = query f x
   query f (Sec _ _ _ ils elts) = query f ils <> query f elts
 
 
@@ -488,8 +470,8 @@ inlineListToIdentifier =
     map (nbspToSp . toLower) .
     filter (\c -> isLetter c || isDigit c || c `elem` "_-. ") .
     stringify
- where nbspToSp '\160'     =  ' '
-       nbspToSp x          =  x
+ where nbspToSp '\160' =  ' '
+       nbspToSp x      =  x
 
 -- | Convert list of Pandoc blocks into (hierarchical) list of Elements
 hierarchicalize :: [Block] -> [Element]
@@ -497,7 +479,7 @@ hierarchicalize blocks = S.evalState (hierarchicalizeWithIds blocks) []
 
 hierarchicalizeWithIds :: [Block] -> S.State [Int] [Element]
 hierarchicalizeWithIds [] = return []
-hierarchicalizeWithIds ((Header level attr@(_,classes,_) title'):xs) = do
+hierarchicalizeWithIds (Header level attr@(_,classes,_) title':xs) = do
   lastnum <- S.get
   let lastnum' = take level lastnum
   let newnum = case length lastnum' of
@@ -510,26 +492,26 @@ hierarchicalizeWithIds ((Header level attr@(_,classes,_) title'):xs) = do
   sectionContents' <- hierarchicalizeWithIds sectionContents
   rest' <- hierarchicalizeWithIds rest
   return $ Sec level newnum attr title' sectionContents' : rest'
-hierarchicalizeWithIds ((Div ("",["references"],[])
-                         (Header level (ident,classes,kvs) title' : xs)):ys) =
-  hierarchicalizeWithIds ((Header level (ident,("references":classes),kvs)
-                           title') : (xs ++ ys))
+hierarchicalizeWithIds (Div ("",["references"],[])
+                         (Header level (ident,classes,kvs) title' : xs):ys) =
+  hierarchicalizeWithIds (Header level (ident,"references":classes,kvs)
+                           title' : (xs ++ ys))
 hierarchicalizeWithIds (x:rest) = do
   rest' <- hierarchicalizeWithIds rest
-  return $ (Blk x) : rest'
+  return $ Blk x : rest'
 
 headerLtEq :: Int -> Block -> Bool
-headerLtEq level (Header l _ _) = l <= level
-headerLtEq level (Div ("",["references"],[]) (Header l _ _ : _))  = l <= level
-headerLtEq _ _ = False
+headerLtEq level (Header l _ _)                                  = l <= level
+headerLtEq level (Div ("",["references"],[]) (Header l _ _ : _)) = l <= level
+headerLtEq _ _                                                   = False
 
 -- | Generate a unique identifier from a list of inlines.
 -- Second argument is a list of already used identifiers.
 uniqueIdent :: [Inline] -> Set.Set String -> String
 uniqueIdent title' usedIdents
   =  let baseIdent = case inlineListToIdentifier title' of
-                        ""   -> "section"
-                        x    -> x
+                        "" -> "section"
+                        x  -> x
          numIdent n = baseIdent ++ "-" ++ show n
      in  if baseIdent `Set.member` usedIdents
            then case find (\x -> not $ numIdent x `Set.member` usedIdents) ([1..60000] :: [Int]) of
@@ -539,8 +521,8 @@ uniqueIdent title' usedIdents
 
 -- | True if block is a Header block.
 isHeaderBlock :: Block -> Bool
-isHeaderBlock (Header _ _ _) = True
-isHeaderBlock _ = False
+isHeaderBlock Header{} = True
+isHeaderBlock _        = False
 
 -- | Shift header levels up or down.
 headerShift :: Int -> Pandoc -> Pandoc
@@ -548,6 +530,14 @@ headerShift n = walk shift
   where shift :: Block -> Block
         shift (Header level attr inner) = Header (level + n) attr inner
         shift x                         = x
+
+-- | Remove empty paragraphs.
+stripEmptyParagraphs :: Pandoc -> Pandoc
+stripEmptyParagraphs = walk go
+  where go :: [Block] -> [Block]
+        go = filter (not . isEmptyParagraph)
+        isEmptyParagraph (Para []) = True
+        isEmptyParagraph _         = False
 
 -- | Detect if a list is tight.
 isTightList :: [[Block]] -> Bool
@@ -566,8 +556,8 @@ addMetaField key val (Meta meta) =
   Meta $ M.insertWith combine key (toMetaValue val) meta
   where combine newval (MetaList xs) = MetaList (xs ++ tolist newval)
         combine newval x             = MetaList [x, newval]
-        tolist (MetaList ys)         = ys
-        tolist y                     = [y]
+        tolist (MetaList ys) = ys
+        tolist y             = [y]
 
 -- | Create 'Meta' from old-style title, authors, date.  This is
 -- provided to ease the transition from the old API.
@@ -575,18 +565,24 @@ makeMeta :: [Inline] -> [[Inline]] -> [Inline] -> Meta
 makeMeta title authors date =
       addMetaField "title" (B.fromList title)
     $ addMetaField "author" (map B.fromList authors)
-    $ addMetaField "date" (B.fromList date)
-    $ nullMeta
+    $ addMetaField "date" (B.fromList date) nullMeta
 
 -- | Remove soft breaks between East Asian characters.
 eastAsianLineBreakFilter :: Pandoc -> Pandoc
 eastAsianLineBreakFilter = bottomUp go
   where go (x:SoftBreak:y:zs) =
          case (stringify x, stringify y) of
-               (xs@(_:_), (c:_))
+               (xs@(_:_), c:_)
                  | charWidth (last xs) == 2 && charWidth c == 2 -> x:y:zs
                _ -> x:SoftBreak:y:zs
         go xs = xs
+
+-- | Builder for underline.
+-- This probably belongs in Builder.hs in pandoc-types.
+-- Will be replaced once Underline is an element.
+underlineSpan :: Inlines -> Inlines
+underlineSpan = B.spanWith ("", ["underline"], [])
+
 
 --
 -- TagSoup HTML handling
@@ -598,7 +594,7 @@ renderTags' = renderTagsOptions
                renderOptions{ optMinimize = matchTags ["hr", "br", "img",
                                                        "meta", "link"]
                             , optRawTag   = matchTags ["script", "style"] }
-              where matchTags = \tags -> flip elem tags . map toLower
+              where matchTags tags = flip elem tags . map toLower
 
 --
 -- File handling
@@ -611,146 +607,12 @@ inDirectory path action = E.bracket
                              setCurrentDirectory
                              (const $ setCurrentDirectory path >> action)
 
-getDefaultReferenceDocx :: Maybe FilePath -> IO Archive
-getDefaultReferenceDocx datadir = do
-  let paths = ["[Content_Types].xml",
-               "_rels/.rels",
-               "docProps/app.xml",
-               "docProps/core.xml",
-               "word/document.xml",
-               "word/fontTable.xml",
-               "word/footnotes.xml",
-               "word/numbering.xml",
-               "word/settings.xml",
-               "word/webSettings.xml",
-               "word/styles.xml",
-               "word/_rels/document.xml.rels",
-               "word/_rels/footnotes.xml.rels",
-               "word/theme/theme1.xml"]
-  let toLazy = fromChunks . (:[])
-  let pathToEntry path = do epochtime <- (floor . utcTimeToPOSIXSeconds) <$>
-                                          getCurrentTime
-                            contents <- toLazy <$> readDataFile datadir
-                                                       ("docx/" ++ path)
-                            return $ toEntry path epochtime contents
-  mbArchive <- case datadir of
-                    Nothing   -> return Nothing
-                    Just d    -> do
-                       exists <- doesFileExist (d </> "reference.docx")
-                       if exists
-                          then return (Just (d </> "reference.docx"))
-                          else return Nothing
-  case mbArchive of
-     Just arch -> toArchive <$> BL.readFile arch
-     Nothing   -> foldr addEntryToArchive emptyArchive <$>
-                     mapM pathToEntry paths
-
-getDefaultReferenceODT :: Maybe FilePath -> IO Archive
-getDefaultReferenceODT datadir = do
-  let paths = ["mimetype",
-               "manifest.rdf",
-               "styles.xml",
-               "content.xml",
-               "meta.xml",
-               "settings.xml",
-               "Configurations2/accelerator/current.xml",
-               "Thumbnails/thumbnail.png",
-               "META-INF/manifest.xml"]
-  let pathToEntry path = do epochtime <- floor `fmap` getPOSIXTime
-                            contents <- (fromChunks . (:[])) `fmap`
-                                          readDataFile datadir ("odt/" ++ path)
-                            return $ toEntry path epochtime contents
-  mbArchive <- case datadir of
-                    Nothing   -> return Nothing
-                    Just d    -> do
-                       exists <- doesFileExist (d </> "reference.odt")
-                       if exists
-                          then return (Just (d </> "reference.odt"))
-                          else return Nothing
-  case mbArchive of
-     Just arch -> toArchive <$> BL.readFile arch
-     Nothing   -> foldr addEntryToArchive emptyArchive <$>
-                     mapM pathToEntry paths
-
-
-readDefaultDataFile :: FilePath -> IO BS.ByteString
-readDefaultDataFile "reference.docx" =
-  (BS.concat . toChunks . fromArchive) <$> getDefaultReferenceDocx Nothing
-readDefaultDataFile "reference.odt" =
-  (BS.concat . toChunks . fromArchive) <$> getDefaultReferenceODT Nothing
-readDefaultDataFile fname =
-#ifdef EMBED_DATA_FILES
-  case lookup (makeCanonical fname) dataFiles of
-    Nothing       -> E.throwIO $ PandocCouldNotFindDataFileError fname
-    Just contents -> return contents
-  where makeCanonical = Posix.joinPath . transformPathParts . splitDirectories
-        transformPathParts = reverse . foldl go []
-        go as     "."  = as
-        go (_:as) ".." = as
-        go as     x    = x : as
-#else
-  getDataFileName fname' >>= checkExistence >>= BS.readFile
-    where fname' = if fname == "MANUAL.txt" then fname else "data" </> fname
-
-checkExistence :: FilePath -> IO FilePath
-checkExistence fn = do
-  exists <- doesFileExist fn
-  if exists
-     then return fn
-     else E.throwIO $ PandocCouldNotFindDataFileError fn
-#endif
-
--- | Read file from specified user data directory or, if not found there, from
--- Cabal data directory.
-readDataFile :: Maybe FilePath -> FilePath -> IO BS.ByteString
-readDataFile Nothing fname = readDefaultDataFile fname
-readDataFile (Just userDir) fname = do
-  exists <- doesFileExist (userDir </> fname)
-  if exists
-     then BS.readFile (userDir </> fname)
-     else readDefaultDataFile fname
-
--- | Same as 'readDataFile' but returns a String instead of a ByteString.
-readDataFileUTF8 :: Maybe FilePath -> FilePath -> IO String
-readDataFileUTF8 userDir fname =
-  UTF8.toString `fmap` readDataFile userDir fname
-
--- | Read from a URL and return raw data and maybe mime type.
-openURL :: String -> IO (Either HttpException (BS.ByteString, Maybe MimeType))
-openURL u
-  | Just u'' <- stripPrefix "data:" u =
-    let mime     = takeWhile (/=',') u''
-        contents = B8.pack $ unEscapeString $ drop 1 $ dropWhile (/=',') u''
-    in  return $ Right (decodeLenient contents, Just mime)
-  | otherwise = E.try $ withSocketsDo $ do
-     let parseReq = parseRequest
-     (proxy :: Either IOError String) <-
-        tryIOError $ getEnv "http_proxy"
-     (useragent :: Either IOError String) <-
-        tryIOError $ getEnv "USER_AGENT"
-     req <- parseReq u
-     req' <- case proxy of
-                     Left _   -> return req
-                     Right pr -> (parseReq pr >>= \r ->
-                                  return $ addProxy (host r) (port r) req)
-                                  `mplus` return req
-     req'' <- case useragent of
-                     Left _ -> return req'
-                     Right ua -> do
-                                   let headers = requestHeaders req'
-                                   let useragentheader = (hUserAgent, B8.pack ua)
-                                   let headers' = useragentheader:headers
-                                   return $ req' {requestHeaders = headers'}
-     resp <- newManager tlsManagerSettings >>= httpLbs req''
-     return (BS.concat $ toChunks $ responseBody resp,
-             UTF8.toString `fmap` lookup hContentType (responseHeaders resp))
-
 --
 -- Error reporting
 --
 
 mapLeft :: (a -> b) -> Either a c -> Either b c
-mapLeft f (Left x) = Left (f x)
+mapLeft f (Left x)  = Left (f x)
 mapLeft _ (Right x) = Right x
 
 -- | Remove intermediate "." and ".." directories from a path.
@@ -767,14 +629,14 @@ collapseFilePath = Posix.joinPath . reverse . foldl go [] . splitDirectories
   where
     go rs "." = rs
     go r@(p:rs) ".." = case p of
-                            ".." -> ("..":r)
-                            (checkPathSeperator -> Just True) -> ("..":r)
-                            _ -> rs
+                            ".."                              -> "..":r
+                            (checkPathSeperator -> Just True) -> "..":r
+                            _                                 -> rs
     go _ (checkPathSeperator -> Just True) = [[Posix.pathSeparator]]
     go rs x = x:rs
-    isSingleton [] = Nothing
+    isSingleton []  = Nothing
     isSingleton [x] = Just x
-    isSingleton _ = Nothing
+    isSingleton _   = Nothing
     checkPathSeperator = fmap isPathSeparator . isSingleton
 
 --
@@ -856,37 +718,40 @@ isURI = maybe False hasKnownScheme . parseURI
 --- Squash blocks into inlines
 ---
 
-blockToInlines :: Block -> [Inline]
-blockToInlines (Plain ils) = ils
-blockToInlines (Para ils) = ils
-blockToInlines (LineBlock lns) = combineLines lns
-blockToInlines (CodeBlock attr str) = [Code attr str]
-blockToInlines (RawBlock fmt str) = [RawInline fmt str]
-blockToInlines (BlockQuote blks) = blocksToInlines blks
+blockToInlines :: Block -> Inlines
+blockToInlines (Plain ils) = B.fromList ils
+blockToInlines (Para ils) = B.fromList ils
+blockToInlines (LineBlock lns) = B.fromList $ combineLines lns
+blockToInlines (CodeBlock attr str) = B.codeWith attr str
+blockToInlines (RawBlock (Format fmt) str) = B.rawInline fmt str
+blockToInlines (BlockQuote blks) = blocksToInlines' blks
 blockToInlines (OrderedList _ blkslst) =
-  concatMap blocksToInlines blkslst
+  mconcat $ map blocksToInlines' blkslst
 blockToInlines (BulletList blkslst) =
-  concatMap blocksToInlines blkslst
+  mconcat $ map blocksToInlines' blkslst
 blockToInlines (DefinitionList pairslst) =
-  concatMap f pairslst
+  mconcat $ map f pairslst
   where
-    f (ils, blkslst) = ils ++
-      [Str ":", Space] ++
-      (concatMap blocksToInlines blkslst)
-blockToInlines (Header _ _  ils) = ils
-blockToInlines (HorizontalRule) = []
+    f (ils, blkslst) = B.fromList ils <> B.str ":" <> B.space <>
+      mconcat (map blocksToInlines' blkslst)
+blockToInlines (Header _ _  ils) = B.fromList ils
+blockToInlines HorizontalRule = mempty
 blockToInlines (Table _ _ _ headers rows) =
-  intercalate [LineBreak] $ map (concatMap blocksToInlines) tbl
-  where
-    tbl = headers : rows
-blockToInlines (Div _ blks) = blocksToInlines blks
-blockToInlines Null = []
+  mconcat $ intersperse B.linebreak $
+    map (mconcat . map blocksToInlines') (headers:rows)
+blockToInlines (Div _ blks) = blocksToInlines' blks
+blockToInlines Null = mempty
 
-blocksToInlinesWithSep :: [Inline] -> [Block] -> [Inline]
-blocksToInlinesWithSep sep blks = intercalate sep $ map blockToInlines blks
+blocksToInlinesWithSep :: Inlines -> [Block] -> Inlines
+blocksToInlinesWithSep sep =
+  mconcat . intersperse sep . map blockToInlines
+
+blocksToInlines' :: [Block] -> Inlines
+blocksToInlines' = blocksToInlinesWithSep parSep
+  where parSep = B.space <> B.str "¶" <> B.space
 
 blocksToInlines :: [Block] -> [Inline]
-blocksToInlines = blocksToInlinesWithSep [Space, Str "¶", Space]
+blocksToInlines = B.toList . blocksToInlines'
 
 
 --

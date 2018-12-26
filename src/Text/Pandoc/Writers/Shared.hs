@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2013-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2013-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Shared
-   Copyright   : Copyright (C) 2013-2017 John MacFarlane
+   Copyright   : Copyright (C) 2013-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -40,9 +40,10 @@ module Text.Pandoc.Writers.Shared (
                      , fixDisplayMath
                      , unsmartify
                      , gridTable
+                     , metaValueToInlines
                      )
 where
-import Control.Monad (liftM, zipWithM)
+import Control.Monad (zipWithM)
 import Data.Aeson (FromJSON (..), Result (..), ToJSON (..), Value (Object),
                    encode, fromJSON)
 import qualified Data.HashMap.Strict as H
@@ -51,9 +52,11 @@ import qualified Data.Map as M
 import Data.Maybe (isJust)
 import qualified Data.Text as T
 import qualified Data.Traversable as Traversable
+import qualified Text.Pandoc.Builder as Builder
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Pretty
+import Text.Pandoc.Walk (query)
 import Text.Pandoc.UTF8 (toStringLazy)
 import Text.Pandoc.XML (escapeStringForXML)
 
@@ -75,7 +78,7 @@ metaToJSON opts blockWriter inlineWriter meta
 
 -- | Like 'metaToJSON', but does not include variables and is
 -- not sensitive to 'writerTemplate'.
-metaToJSON' :: (Monad m, ToJSON a)
+metaToJSON' :: (Functor m, Monad m, ToJSON a)
            => ([Block] -> m a)
            -> ([Inline] -> m a)
            -> Meta
@@ -98,19 +101,20 @@ addVariablesToJSON opts metadata =
   where combineMetadata (Object o1) (Object o2) = Object $ H.union o1 o2
         combineMetadata x _                     = x
 
-metaValueToJSON :: (Monad m, ToJSON a)
+metaValueToJSON :: (Functor m, Monad m, ToJSON a)
                 => ([Block] -> m a)
                 -> ([Inline] -> m a)
                 -> MetaValue
                 -> m Value
-metaValueToJSON blockWriter inlineWriter (MetaMap metamap) = liftM toJSON $
+metaValueToJSON blockWriter inlineWriter (MetaMap metamap) = toJSON <$>
   Traversable.mapM (metaValueToJSON blockWriter inlineWriter) metamap
-metaValueToJSON blockWriter inlineWriter (MetaList xs) = liftM toJSON $
+metaValueToJSON blockWriter inlineWriter (MetaList xs) = toJSON <$>
   Traversable.mapM (metaValueToJSON blockWriter inlineWriter) xs
 metaValueToJSON _ _ (MetaBool b) = return $ toJSON b
-metaValueToJSON _ _ (MetaString s) = return $ toJSON s
-metaValueToJSON blockWriter _ (MetaBlocks bs) = liftM toJSON $ blockWriter bs
-metaValueToJSON _ inlineWriter (MetaInlines bs) = liftM toJSON $ inlineWriter bs
+metaValueToJSON _ inlineWriter (MetaString s) = toJSON <$>
+  inlineWriter (Builder.toList (Builder.text s))
+metaValueToJSON blockWriter _ (MetaBlocks bs) = toJSON <$> blockWriter bs
+metaValueToJSON _ inlineWriter (MetaInlines is) = toJSON <$> inlineWriter is
 
 -- | Retrieve a field value from a JSON object.
 getField :: FromJSON a
@@ -194,13 +198,19 @@ fixDisplayMath :: Block -> Block
 fixDisplayMath (Plain lst)
   | any isDisplayMath lst && not (all isDisplayMath lst) =
     -- chop into several paragraphs so each displaymath is its own
-    Div ("",["math"],[]) $ map (Plain . stripLeadingTrailingSpace) $
+    Div ("",["math"],[]) $
+       map Plain $
+       filter (not . null) $
+       map stripLeadingTrailingSpace $
        groupBy (\x y -> (isDisplayMath x && isDisplayMath y) ||
                          not (isDisplayMath x || isDisplayMath y)) lst
 fixDisplayMath (Para lst)
   | any isDisplayMath lst && not (all isDisplayMath lst) =
     -- chop into several paragraphs so each displaymath is its own
-    Div ("",["math"],[]) $ map (Para . stripLeadingTrailingSpace) $
+    Div ("",["math"],[]) $
+       map Para $
+       filter (not . null) $
+       map stripLeadingTrailingSpace $
        groupBy (\x y -> (isDisplayMath x && isDisplayMath y) ||
                          not (isDisplayMath x || isDisplayMath y)) lst
 fixDisplayMath x = x
@@ -214,6 +224,9 @@ unsmartify opts ('\8211':xs)
 unsmartify opts ('\8212':xs)
   | isEnabled Ext_old_dashes opts = "--" ++ unsmartify opts xs
   | otherwise                     = "---" ++ unsmartify opts xs
+unsmartify opts ('\8220':xs) = '"' : unsmartify opts xs
+unsmartify opts ('\8221':xs) = '"' : unsmartify opts xs
+unsmartify opts ('\8216':xs) = '\'' : unsmartify opts xs
 unsmartify opts (x:xs) = x : unsmartify opts xs
 unsmartify _ [] = []
 
@@ -263,19 +276,19 @@ gridTable opts blocksToDoc headless aligns widths headers rows = do
                                              else handleGivenWidths widths
   let hpipeBlocks blocks = hcat [beg, middle, end]
         where h       = maximum (1 : map height blocks)
-              sep'    = lblock 3 $ vcat (map text $ replicate h " | ")
-              beg     = lblock 2 $ vcat (map text $ replicate h "| ")
-              end     = lblock 2 $ vcat (map text $ replicate h " |")
+              sep'    = lblock 3 $ vcat (replicate h (text " | "))
+              beg     = lblock 2 $ vcat (replicate h (text "| "))
+              end     = lblock 2 $ vcat (replicate h (text " |"))
               middle  = chomp $ hcat $ intersperse sep' blocks
   let makeRow = hpipeBlocks . zipWith lblock widthsInChars
   let head' = makeRow rawHeaders
   let rows' = map (makeRow . map chomp) rawRows
   let borderpart ch align widthInChars =
-           (if (align == AlignLeft || align == AlignCenter)
+           (if align == AlignLeft || align == AlignCenter
                then char ':'
                else char ch) <>
            text (replicate widthInChars ch) <>
-           (if (align == AlignRight || align == AlignCenter)
+           (if align == AlignRight || align == AlignCenter
                then char ':'
                else char ch)
   let border ch aligns' widthsInChars' =
@@ -297,3 +310,10 @@ gridTable opts blocksToDoc headless aligns widths headers rows = do
            head'' $$
            body $$
            border '-' (repeat AlignDefault) widthsInChars
+
+metaValueToInlines :: MetaValue -> [Inline]
+metaValueToInlines (MetaString s)    = [Str s]
+metaValueToInlines (MetaInlines ils) = ils
+metaValueToInlines (MetaBlocks bs)   = query return bs
+metaValueToInlines (MetaBool b)      = [Str $ show b]
+metaValueToInlines _                 = []

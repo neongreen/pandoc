@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2008-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2008-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Highlighting
-   Copyright   : Copyright (C) 2008-2017 John MacFarlane
+   Copyright   : Copyright (C) 2008-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -81,17 +81,22 @@ highlight :: SyntaxMap
           -> Attr   -- ^ Attributes of the CodeBlock
           -> String -- ^ Raw contents of the CodeBlock
           -> Either String a
-highlight syntaxmap formatter (_, classes, keyvals) rawCode =
+highlight syntaxmap formatter (ident, classes, keyvals) rawCode =
   let firstNum = fromMaybe 1 (safeRead (fromMaybe "1" $ lookup "startFrom" keyvals))
       fmtOpts = defaultFormatOpts{
                   startNumber = firstNum,
+                  lineAnchors = any (`elem`
+                        ["line-anchors", "lineAnchors"]) classes,
                   numberLines = any (`elem`
-                        ["number","numberLines", "number-lines"]) classes }
+                        ["number","numberLines", "number-lines"]) classes,
+                  lineIdPrefix = if null ident
+                                    then mempty
+                                    else T.pack (ident ++ "-") }
       tokenizeOpts = TokenizerConfig{ syntaxMap = syntaxmap
                                     , traceOutput = False }
       classes' = map T.pack classes
       rawCode' = T.pack rawCode
-  in  case msum (map ((`lookupSyntax` syntaxmap)) classes') of
+  in  case msum (map (`lookupSyntax` syntaxmap) classes') of
             Nothing
               | numberLines fmtOpts -> Right
                               $ formatter fmtOpts{ codeClasses = [],

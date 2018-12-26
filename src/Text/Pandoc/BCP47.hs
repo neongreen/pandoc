@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2017–2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.BCP47
-   Copyright   : Copyright (C) 2017 John MacFarlane
+   Copyright   : Copyright (C) 2017–2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -29,27 +29,24 @@ Functions for parsing and rendering BCP47 language identifiers.
 -}
 module Text.Pandoc.BCP47 (
                        getLang
-                     , toLang
                      , parseBCP47
                      , Lang(..)
                      , renderLang
                      )
 where
 import Control.Monad (guard)
-import Data.Char (isAscii, isLetter, isUpper, isLower, toUpper, toLower,
-                  isAlphaNum)
+import Data.Char (isAlphaNum, isAscii, isLetter, isLower, isUpper, toLower,
+                  toUpper)
 import Data.List (intercalate)
 import Text.Pandoc.Definition
-import Text.Pandoc.Class (PandocMonad, report)
-import Text.Pandoc.Logging
 import Text.Pandoc.Options
 import qualified Text.Parsec as P
 
 -- | Represents BCP 47 language/country code.
-data Lang = Lang{ langLanguage   :: String
-                , langScript     :: String
-                , langRegion     :: String
-                , langVariants   :: [String] }
+data Lang = Lang{ langLanguage :: String
+                , langScript   :: String
+                , langRegion   :: String
+                , langVariants :: [String] }
                 deriving (Eq, Ord, Show)
 
 -- | Render a Lang as BCP 47.
@@ -68,17 +65,6 @@ getLang opts meta =
                Just (MetaString s)        -> Just s
                _                          -> Nothing
 
--- | Convert BCP47 string to a Lang, issuing warning
--- if there are problems.
-toLang :: PandocMonad m => Maybe String -> m (Maybe Lang)
-toLang Nothing = return Nothing
-toLang (Just s) =
-  case parseBCP47 s of
-       Left _ -> do
-         report $ InvalidLang s
-         return Nothing
-       Right l -> return (Just l)
-
 -- | Parse a BCP 47 string as a Lang.  Currently we parse
 -- extensions and private-use fields as "variants," even
 -- though officially they aren't.
@@ -93,7 +79,7 @@ parseBCP47 lang =
           region <- P.option "" pRegion
           variants <- P.many (pVariant P.<|> pExtension P.<|> pPrivateUse)
           P.eof
-          return $ Lang{ langLanguage = language
+          return Lang{   langLanguage = language
                        , langScript = script
                        , langRegion = region
                        , langVariants = variants }
@@ -134,6 +120,6 @@ parseBCP47 lang =
           P.char 'x'
           P.char '-'
           cs <- P.many1 $ P.satisfy (\c -> isAscii c && isAlphaNum c)
-          guard $ length cs >= 1 && length cs <= 8
+          guard $ not (null cs) && length cs <= 8
           let var = "x-" ++ cs
           return $ map toLower var

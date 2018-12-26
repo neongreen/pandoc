@@ -287,24 +287,21 @@ Multiple blocks with italics:
 Multiple definitions, tight:
 
  apple :: red fruit
-          computer
+       :: computer
  orange :: orange fruit
-           bank
+        :: bank
 
 Multiple definitions, loose:
 
  apple :: red fruit
-
-          computer
+       :: computer
  orange :: orange fruit
-
-           bank
+        :: bank
 
 Blank line after term, indented marker, alternate markers:
 
  apple :: red fruit
-
-          computer
+       :: computer
  orange :: orange fruit
 
            1. sublist
@@ -314,11 +311,13 @@ Blank line after term, indented marker, alternate markers:
 
 Simple block on one line:
 
-fooAnd nested without indentation:
+foo
+And nested without indentation:
 
 foo
 
-barInterpreted markdown in a table:
+bar
+Interpreted markdown in a table:
 
 <literal style="html">
 <table>
@@ -380,7 +379,8 @@ As should this:
 
 Now, nested:
 
-fooThis should just be an HTML comment:
+foo
+This should just be an HTML comment:
 
 <literal style="html">
 <!-- Comment -->
@@ -475,8 +475,8 @@ So is <strong><em>this</em></strong> word.
 
 So is <strong><em>this</em></strong> word.
 
-This is code: <code><verbatim>></verbatim></code>, <code>$</code>,
-<code>\</code>, <code>\$</code>, <code><verbatim><html></verbatim></code>.
+This is code: <code>></code>, <code>$</code>, <code>\</code>, <code>\$</code>,
+<code><html></code>.
 
 <del>This is <em>strikeout</em>.</del>
 
@@ -492,16 +492,16 @@ spaces: a^b c^d, a~b c~d.
 
 * Smart quotes, ellipses, dashes
 
-"Hello," said the spider. "'Shelob' is my name."
+“Hello,” said the spider. “‘Shelob’ is my name.”
 
-'A', 'B', and 'C' are letters.
+‘A’, ‘B’, and ‘C’ are letters.
 
-'Oak,' 'elm,' and 'beech' are names of trees. So is 'pine.'
+‘Oak,’ ‘elm,’ and ‘beech’ are names of trees. So is ‘pine.’
 
-'He said, "I want to go."' Were you alive in the 70’s?
+‘He said, “I want to go.”’ Were you alive in the 70’s?
 
-Here is some quoted '<code>code</code>' and a
-"[[http://example.com/?foo=1&bar=2][quoted link]]".
+Here is some quoted ‘<code>code</code>’ and a
+“[[http://example.com/?foo=1&bar=2][quoted link]]”.
 
 Some dashes: one—two — three—four — five.
 
@@ -520,15 +520,14 @@ Ellipses…and…and….
  - 223
  - <em>p</em>-Tree
  - Here’s some display math:
-   <verse><verbatim>$$\frac{d}{dx}f(x)=\lim_{h\to 0}\frac{f(x+h)-f(x)}{h}$$</verbatim></verse>
+   <verbatim>$$\frac{d}{dx}f(x)=\lim_{h\to 0}\frac{f(x+h)-f(x)}{h}$$</verbatim>
  - Here’s one that has a line break in it:
    <em>α</em> + <em>ω</em> × <em>x</em><sup>2</sup>.
 
 These shouldn’t be math:
 
- - To get the famous equation, write
-   <code><verbatim>$e = mc^2$</verbatim></code>.
- - $22,000 is a <em>lot</em> of money. So is $34,000. (It worked if "lot" is
+ - To get the famous equation, write <code>$e = mc^2$</code>.
+ - $22,000 is a <em>lot</em> of money. So is $34,000. (It worked if “lot” is
    emphasized.)
  - Shoes ($20) and socks ($5).
  - Escaped <code>$</code>: $73 <em>this should be emphasized</em> 23$.
@@ -587,7 +586,7 @@ Right paren: )
 
 Greater-than: <verbatim>></verbatim>
 
-Hash: #
+Hash: <verbatim>#</verbatim>
 
 Period: .
 
@@ -670,8 +669,7 @@ An e-mail address: [[mailto:nobody@nowhere.net][nobody@nowhere.net]]
 Blockquoted: [[http://example.com/]]
 </quote>
 
-Auto-links should not occur here:
-<code><verbatim><http://example.com/></verbatim></code>
+Auto-links should not occur here: <code><http://example.com/></code>
 
 <example>
 or here: <http://example.com/>
@@ -681,7 +679,7 @@ or here: <http://example.com/>
 
 * Images
 
-From "Voyage dans la Lune" by Georges Melies (1902):
+From “Voyage dans la Lune” by Georges Melies (1902):
 
 [[lalune.jpg][Voyage dans la Lune]]
 
@@ -719,9 +717,8 @@ This paragraph should not be part of the note, as it is not indented.
     indent the first line of each block.
 
 [3] This is <em>easier</em> to type. Inline notes may contain
-    [[http://google.com][links]] and <code><verbatim>]</verbatim></code>
-    verbatim characters, as well as <verbatim>[bracketed</verbatim>
-    <verbatim>text].</verbatim>
+    [[http://google.com][links]] and <code>]</code> verbatim characters, as
+    well as <verbatim>[bracketed</verbatim> <verbatim>text].</verbatim>
 
 [4] In quote.
 

@@ -1,8 +1,8 @@
 {-# LANGUAGE Arrows          #-}
-{-# LANGUAGE TupleSections   #-}
 {-# LANGUAGE PatternGuards   #-}
-{-# LANGUAGE ViewPatterns    #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections   #-}
+{-# LANGUAGE ViewPatterns    #-}
 
 {-
 Copyright (C) 2015 Martin Linnemann <theCodingMarlin@googlemail.com>
@@ -39,29 +39,28 @@ module Text.Pandoc.Readers.Odt.ContentReader
 , read_body
 ) where
 
-import           Control.Arrow
-import           Control.Applicative    hiding ( liftA, liftA2, liftA3 )
+import Control.Applicative hiding (liftA, liftA2, liftA3)
+import Control.Arrow
 
-import qualified Data.ByteString.Lazy   as B
-import qualified Data.Map               as M
-import           Data.List                     ( find, intercalate )
-import           Data.Maybe
+import qualified Data.ByteString.Lazy as B
+import Data.List (find, intercalate)
+import qualified Data.Map as M
+import Data.Maybe
 
-import qualified Text.XML.Light         as XML
+import qualified Text.XML.Light as XML
 
-import           Text.Pandoc.Definition
-import           Text.Pandoc.Builder
-import           Text.Pandoc.MediaBag (insertMedia, MediaBag)
-import           Text.Pandoc.Shared
+import Text.Pandoc.Builder
+import Text.Pandoc.MediaBag (MediaBag, insertMedia)
+import Text.Pandoc.Shared
 
-import           Text.Pandoc.Readers.Odt.Base
-import           Text.Pandoc.Readers.Odt.Namespaces
-import           Text.Pandoc.Readers.Odt.StyleReader
+import Text.Pandoc.Readers.Odt.Base
+import Text.Pandoc.Readers.Odt.Namespaces
+import Text.Pandoc.Readers.Odt.StyleReader
 
-import           Text.Pandoc.Readers.Odt.Arrows.Utils
-import           Text.Pandoc.Readers.Odt.Generic.XMLConverter
-import           Text.Pandoc.Readers.Odt.Generic.Fallible
-import           Text.Pandoc.Readers.Odt.Generic.Utils
+import Text.Pandoc.Readers.Odt.Arrows.Utils
+import Text.Pandoc.Readers.Odt.Generic.Fallible
+import Text.Pandoc.Readers.Odt.Generic.Utils
+import Text.Pandoc.Readers.Odt.Generic.XMLConverter
 
 import qualified Data.Set as Set
 
@@ -248,7 +247,7 @@ getPrettyAnchor = proc (baseIdent, uglyAnchor) -> do
       modifyExtraState (putPrettyAnchor uglyAnchor newPretty) -<< newPretty
 
 -- | Input: basis for a new header anchor
--- Ouput: saved new anchor
+-- Output: saved new anchor
 getHeaderAnchor :: OdtReaderSafe Inlines Anchor
 getHeaderAnchor = proc title -> do
   state <- getExtraState -< ()
@@ -294,7 +293,7 @@ withNewStyle a = proc x -> do
           modifier     <- arr modifierFromStyleDiff -< triple
           fShouldTrace <- isStyleToTrace            -< style
           case fShouldTrace of
-            Right shouldTrace -> do
+            Right shouldTrace ->
               if shouldTrace
                 then do
                   pushStyle      -< style
@@ -323,7 +322,7 @@ type InlineModifier = Inlines -> Inlines
 modifierFromStyleDiff :: PropertyTriple -> InlineModifier
 modifierFromStyleDiff propertyTriple  =
   composition $
-  (getVPosModifier propertyTriple)
+  getVPosModifier propertyTriple
   : map (first ($ propertyTriple) >>> ifThen_else ignore)
         [ (hasEmphChanged           , emph      )
         , (hasChanged isStrong      , strong    )
@@ -342,9 +341,9 @@ modifierFromStyleDiff propertyTriple  =
               Just oldVPos -> getVPosModifier' (oldVPos, verticalPosition textProps)
 
     getVPosModifier' (oldVPos , newVPos   ) | oldVPos == newVPos = ignore
-    getVPosModifier' ( _      , VPosSub   )                      = subscript
-    getVPosModifier' ( _      , VPosSuper )                      = superscript
-    getVPosModifier' ( _      ,  _        )                      = ignore
+    getVPosModifier' ( _      , VPosSub   ) = subscript
+    getVPosModifier' ( _      , VPosSuper ) = superscript
+    getVPosModifier' ( _      ,  _        ) = ignore
 
     hasEmphChanged :: PropertyTriple -> Bool
     hasEmphChanged = swing any [ hasChanged  isEmphasised
@@ -353,17 +352,17 @@ modifierFromStyleDiff propertyTriple  =
                                ]
 
     hasChanged property triple@(_, property -> newProperty, _) =
-        maybe True (/=newProperty) (lookupPreviousValue property triple)
+        (/= Just newProperty) (lookupPreviousValue property triple)
 
     hasChangedM property triple@(_, textProps,_) =
       fromMaybe False $ (/=) <$> property textProps <*> lookupPreviousValueM property triple
 
-    lookupPreviousValue f = lookupPreviousStyleValue ((fmap f).textProperties)
+    lookupPreviousValue f = lookupPreviousStyleValue (fmap f . textProperties)
 
     lookupPreviousValueM f = lookupPreviousStyleValue ((f =<<).textProperties)
 
     lookupPreviousStyleValue f (ReaderState{..},_,mFamily)
-      =     ( findBy f $ extendedStylePropertyChain styleTrace styleSet )
+      =     findBy f (extendedStylePropertyChain styleTrace styleSet)
         <|> ( f =<< fmap (lookupDefaultStyle' styleSet) mFamily         )
 
 
@@ -567,7 +566,7 @@ read_text_seq  = matchingElement NsText "sequence"
 
 
 -- specifically. I honor that, although the current implementation of '(<>)'
--- for 'Inlines' in "Text.Pandoc.Builder" will collaps them agein.
+-- for 'Inlines' in "Text.Pandoc.Builder" will collapse them again.
 -- The rational is to be prepared for future modifications.
 read_spaces      :: InlineMatcher
 read_spaces       = matchingElement NsText "s" (
@@ -794,8 +793,7 @@ read_image_src = matchingElement NsDraw "image"
                       Left _    -> returnV ""  -< ()
 
 read_frame_title :: InlineMatcher
-read_frame_title = matchingElement NsSVG "title"
-                   $ (matchChildContent [] read_plain_text)
+read_frame_title = matchingElement NsSVG "title" (matchChildContent [] read_plain_text)
 
 read_frame_text_box :: InlineMatcher
 read_frame_text_box = matchingElement NsDraw "text-box"
@@ -804,12 +802,12 @@ read_frame_text_box = matchingElement NsDraw "text-box"
                          arr read_img_with_caption                             -< toList paragraphs
 
 read_img_with_caption :: [Block] -> Inlines
-read_img_with_caption ((Para ((Image attr alt (src,title)) : [])) : _) =
+read_img_with_caption (Para [Image attr alt (src,title)] : _) =
   singleton (Image attr alt (src, 'f':'i':'g':':':title))   -- no text, default caption
-read_img_with_caption ((Para ((Image attr _ (src,title)) : txt)) : _) =
+read_img_with_caption (Para (Image attr _ (src,title) : txt) : _) =
   singleton (Image attr txt (src, 'f':'i':'g':':':title) )  -- override caption with the text that follows
-read_img_with_caption  ( (Para (_ : xs)) : ys) =
-  read_img_with_caption ((Para xs) : ys)
+read_img_with_caption  ( Para (_ : xs) : ys) =
+  read_img_with_caption (Para xs : ys)
 read_img_with_caption _ =
   mempty
 
@@ -910,8 +908,8 @@ post_process (Pandoc m blocks) =
   Pandoc m (post_process' blocks)
 
 post_process' :: [Block] -> [Block]
-post_process' ((Table _ a w h r) : (Div ("", ["caption"], _) [Para inlines] ) : xs) =
-  (Table inlines a w h r) : ( post_process' xs )
+post_process' (Table _ a w h r : Div ("", ["caption"], _) [Para inlines] : xs) =
+  Table inlines a w h r : post_process' xs
 post_process' bs = bs
 
 read_body :: OdtReader _x (Pandoc, MediaBag)

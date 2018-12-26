@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2011-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2011-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.SelfContained
-   Copyright   : Copyright (C) 2011-2017 John MacFarlane
+   Copyright   : Copyright (C) 2011-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -35,21 +35,21 @@ import Codec.Compression.GZip as Gzip
 import Control.Applicative ((<|>))
 import Control.Monad.Except (throwError)
 import Control.Monad.Trans (lift)
-import Data.Monoid ((<>))
 import Data.ByteString (ByteString)
 import Data.ByteString.Base64
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import Data.Char (isAlphaNum, isAscii, toLower)
 import Data.List (isPrefixOf)
-import Network.URI (URI (..), escapeURIString, parseURI)
+import Data.Monoid ((<>))
+import Network.URI (escapeURIString)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import Text.HTML.TagSoup
-import Text.Pandoc.Class (PandocMonad (..), fetchItem, report)
+import Text.Pandoc.Class (PandocMonad (..), fetchItem, getInputFiles, report,
+                          setInputFiles)
 import Text.Pandoc.Error
 import Text.Pandoc.Logging
 import Text.Pandoc.MIME (MimeType)
-import Text.Pandoc.Options (WriterOptions (..))
 import Text.Pandoc.Shared (isURI, renderTags', trim)
 import Text.Pandoc.UTF8 (toString)
 import Text.Parsec (ParsecT, runParserT)
@@ -68,29 +68,30 @@ makeDataURI (mime, raw) =
                    then mime ++ ";charset=utf-8"
                    else mime  -- mime type already has charset
 
-convertTags :: PandocMonad m => Maybe String -> [Tag String] -> m [Tag String]
-convertTags _ [] = return []
-convertTags sourceURL (t@TagOpen{}:ts)
-  | fromAttrib "data-external" t == "1" = (t:) <$> convertTags sourceURL ts
-convertTags sourceURL (t@(TagOpen tagname as):ts)
+convertTags :: PandocMonad m => [Tag String] -> m [Tag String]
+convertTags [] = return []
+convertTags (t@TagOpen{}:ts)
+  | fromAttrib "data-external" t == "1" = (t:) <$> convertTags ts
+convertTags (t@(TagOpen tagname as):ts)
   | tagname `elem`
-     ["img", "embed", "video", "input", "audio", "source", "track"] = do
+     ["img", "embed", "video", "input", "audio", "source", "track",
+      "section"] = do
        as' <- mapM processAttribute as
-       rest <- convertTags sourceURL ts
+       rest <- convertTags ts
        return $ TagOpen tagname as' : rest
   where processAttribute (x,y) =
-           if x == "src" || x == "data-src" || x == "href" || x == "poster"
+           if x `elem` ["src", "data-src", "href", "poster", "data-background-image"]
               then do
-                enc <- getDataURI sourceURL (fromAttrib "type" t) y
+                enc <- getDataURI (fromAttrib "type" t) y
                 return (x, enc)
               else return (x,y)
-convertTags sourceURL (t@(TagOpen "script" as):TagClose "script":ts) =
+convertTags (t@(TagOpen "script" as):TagClose "script":ts) =
   case fromAttrib "src" t of
-       []  -> (t:) <$> convertTags sourceURL ts
+       []  -> (t:) <$> convertTags ts
        src    -> do
            let typeAttr = fromAttrib "type" t
-           res <- getData sourceURL typeAttr src
-           rest <- convertTags sourceURL ts
+           res <- getData typeAttr src
+           rest <- convertTags ts
            case res of
                 Left dataUri -> return $ TagOpen "script"
                      (("src",dataUri) : [(x,y) | (x,y) <- as, x /= "src"]) :
@@ -110,21 +111,22 @@ convertTags sourceURL (t@(TagOpen "script" as):TagClose "script":ts) =
                          (("src",makeDataURI (mime, bs)) :
                           [(x,y) | (x,y) <- as, x /= "src"]) :
                         TagClose "script" : rest
-convertTags sourceURL (t@(TagOpen "link" as):ts) =
+convertTags (t@(TagOpen "link" as):ts) =
   case fromAttrib "href" t of
-       []  -> (t:) <$> convertTags sourceURL ts
+       []  -> (t:) <$> convertTags ts
        src -> do
-           res <- getData sourceURL (fromAttrib "type" t) src
+           res <- getData (fromAttrib "type" t) src
            case res of
                 Left dataUri -> do
-                  rest <- convertTags sourceURL ts
+                  rest <- convertTags ts
                   return $ TagOpen "link"
                      (("href",dataUri) : [(x,y) | (x,y) <- as, x /= "href"]) :
                      rest
                 Right (mime, bs)
                   | "text/css" `isPrefixOf` mime
+                    && null (fromAttrib "media" t)
                     && not ("</" `B.isInfixOf` bs) -> do
-                      rest <- convertTags sourceURL $
+                      rest <- convertTags $
                                  dropWhile (==TagClose "link") ts
                       return $
                        TagOpen "style" [("type", mime)]
@@ -132,16 +134,16 @@ convertTags sourceURL (t@(TagOpen "link" as):ts) =
                        : TagClose "style"
                        : rest
                   | otherwise -> do
-                      rest <- convertTags sourceURL ts
+                      rest <- convertTags ts
                       return $ TagOpen "link"
                        (("href",makeDataURI (mime, bs)) :
                          [(x,y) | (x,y) <- as, x /= "href"]) : rest
-convertTags sourceURL (t:ts) = (t:) <$> convertTags sourceURL ts
+convertTags (t:ts) = (t:) <$> convertTags ts
 
 cssURLs :: PandocMonad m
-        => Maybe String -> FilePath -> ByteString -> m ByteString
-cssURLs sourceURL d orig = do
-  res <- runParserT (parseCSSUrls sourceURL d) () "css" orig
+        => FilePath -> ByteString -> m ByteString
+cssURLs d orig = do
+  res <- runParserT (parseCSSUrls d) () "css" orig
   case res of
        Left e    -> do
          report $ CouldNotParseCSS (show e)
@@ -149,17 +151,16 @@ cssURLs sourceURL d orig = do
        Right bs  -> return bs
 
 parseCSSUrls :: PandocMonad m
-             => Maybe String -> FilePath -> ParsecT ByteString () m ByteString
-parseCSSUrls sourceURL d = B.concat <$> P.many
-    (pCSSWhite <|> pCSSComment <|> pCSSImport sourceURL d <|>
-     pCSSUrl sourceURL d <|> pCSSOther)
+             => FilePath -> ParsecT ByteString () m ByteString
+parseCSSUrls d = B.concat <$> P.many
+  (pCSSWhite <|> pCSSComment <|> pCSSImport d <|> pCSSUrl d <|> pCSSOther)
 
-pCSSImport :: PandocMonad m => Maybe String -> FilePath
-           -> ParsecT ByteString () m ByteString
-pCSSImport sourceURL d = P.try $ do
+pCSSImport :: PandocMonad m
+           => FilePath -> ParsecT ByteString () m ByteString
+pCSSImport d = P.try $ do
   P.string "@import"
   P.spaces
-  res <- (pQuoted <|> pUrl) >>= handleCSSUrl sourceURL d
+  res <- (pQuoted <|> pUrl) >>= handleCSSUrl d
   P.spaces
   P.char ';'
   P.spaces
@@ -178,15 +179,15 @@ pCSSComment = P.try $ do
   return B.empty
 
 pCSSOther :: PandocMonad m => ParsecT ByteString () m ByteString
-pCSSOther = do
+pCSSOther =
   (B.pack <$> P.many1 (P.noneOf "u/ \n\r\t")) <|>
-    (B.singleton <$> P.char 'u') <|>
-    (B.singleton <$> P.char '/')
+  (B.singleton <$> P.char 'u') <|>
+  (B.singleton <$> P.char '/')
 
 pCSSUrl :: PandocMonad m
-        => Maybe String -> FilePath -> ParsecT ByteString () m ByteString
-pCSSUrl sourceURL d = P.try $ do
-  res <- pUrl >>= handleCSSUrl sourceURL d
+        => FilePath -> ParsecT ByteString () m ByteString
+pCSSUrl d = P.try $ do
+  res <- pUrl >>= handleCSSUrl d
   case res of
        Left b -> return b
        Right (mt,b) -> do
@@ -215,59 +216,54 @@ pUrl = P.try $ do
   return (url, fallback)
 
 handleCSSUrl :: PandocMonad m
-             => Maybe String -> FilePath -> (String, ByteString)
+             => FilePath -> (String, ByteString)
              -> ParsecT ByteString () m
                   (Either ByteString (MimeType, ByteString))
-handleCSSUrl sourceURL d (url, fallback) = do
-  -- pipes are used in URLs provided by Google Code fonts
-  -- but parseURI doesn't like them, so we escape them:
+handleCSSUrl d (url, fallback) =
   case escapeURIString (/='|') (trim url) of
       '#':_ -> return $ Left fallback
       'd':'a':'t':'a':':':_ -> return $ Left fallback
       u ->  do let url' = if isURI u then u else d </> u
-               res <- lift $ getData sourceURL "" url'
+               res <- lift $ getData "" url'
                case res of
                     Left uri -> return $ Left (B.pack $ "url(" ++ uri ++ ")")
                     Right (mt, raw) -> do
                       -- note that the downloaded CSS may
                       -- itself contain url(...).
                       b <- if "text/css" `isPrefixOf` mt
-                              then cssURLs sourceURL d raw
+                              then cssURLs d raw
                               else return raw
                       return $ Right (mt, b)
 
-getDataURI :: PandocMonad m => Maybe String -> MimeType -> String -> m String
-getDataURI sourceURL mimetype src = do
-  res <- getData sourceURL mimetype src
+getDataURI :: PandocMonad m => MimeType -> String -> m String
+getDataURI mimetype src = do
+  res <- getData mimetype src
   case res of
        Left uri -> return uri
        Right x  -> return $ makeDataURI x
 
 getData :: PandocMonad m
-        => Maybe String -> MimeType -> String
+        => MimeType -> String
         -> m (Either String (MimeType, ByteString))
-getData _ _ src@('d':'a':'t':'a':':':_) = return $ Left src-- already data: uri
-getData sourceURL mimetype src = do
+getData _ src@('d':'a':'t':'a':':':_) = return $ Left src-- already data: uri
+getData mimetype src = do
   let ext = map toLower $ takeExtension src
-  (raw, respMime) <- fetchItem sourceURL src
+  (raw, respMime) <- fetchItem src
   let raw' = if ext == ".gz"
-                then B.concat $ L.toChunks $ Gzip.decompress $ L.fromChunks
-                      $ [raw]
+                then B.concat $ L.toChunks $ Gzip.decompress $ L.fromChunks [raw]
                 else raw
   mime <- case (mimetype, respMime) of
                   ("",Nothing) -> throwError $ PandocSomeError
                          $ "Could not determine mime type for `" ++ src ++ "'"
                   (x, Nothing) -> return x
                   (_, Just x ) -> return x
-  let cssSourceURL = case parseURI src of
-                          Just u
-                            | uriScheme u `elem` ["http:","https:"] ->
-                                Just $ show u{ uriPath = "",
-                                               uriQuery = "",
-                                               uriFragment = "" }
-                          _ -> Nothing
   result <- if "text/css" `isPrefixOf` mime
-               then cssURLs cssSourceURL (takeDirectory src) raw'
+               then do
+                 oldInputs <- getInputFiles
+                 setInputFiles [src]
+                 res <- cssURLs (takeDirectory src) raw'
+                 setInputFiles oldInputs
+                 return res
                else return raw'
   return $ Right (mime, result)
 
@@ -275,8 +271,8 @@ getData sourceURL mimetype src = do
 
 -- | Convert HTML into self-contained HTML, incorporating images,
 -- scripts, and CSS using data: URIs.
-makeSelfContained :: PandocMonad m => WriterOptions -> String -> m String
-makeSelfContained opts inp = do
+makeSelfContained :: PandocMonad m => String -> m String
+makeSelfContained inp = do
   let tags = parseTags inp
-  out' <- convertTags (writerSourceURL opts) tags
+  out' <- convertTags tags
   return $ renderTags' out'

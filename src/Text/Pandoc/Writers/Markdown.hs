@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Markdown
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -36,11 +36,11 @@ Markdown:  <http://daringfireball.net/projects/markdown/>
 module Text.Pandoc.Writers.Markdown (writeMarkdown, writePlain) where
 import Control.Monad.Reader
 import Control.Monad.State.Strict
-import Data.Char (chr, isPunctuation, isSpace, ord)
+import Data.Char (chr, isPunctuation, isSpace, ord, isAlphaNum)
 import Data.Default
 import qualified Data.HashMap.Strict as H
-import qualified Data.Map as M
 import Data.List (find, group, intersperse, sortBy, stripPrefix, transpose)
+import qualified Data.Map as M
 import Data.Maybe (fromMaybe)
 import Data.Monoid (Any (..))
 import Data.Ord (comparing)
@@ -286,8 +286,15 @@ escapeString opts (c:cs) =
        '>' | isEnabled Ext_all_symbols_escapable opts ->
               '\\' : '>' : escapeString opts cs
            | otherwise -> "&gt;" ++ escapeString opts cs
+       '@' | isEnabled Ext_citations opts ->
+               case cs of
+                    (d:_)
+                      | isAlphaNum d || d == '_'
+                         -> '\\':'@':escapeString opts cs
+                    _ -> '@':escapeString opts cs
        _ | c `elem` ['\\','`','*','_','[',']','#'] ->
               '\\':c:escapeString opts cs
+       '|' | isEnabled Ext_pipe_tables opts -> '\\':'|':escapeString opts cs
        '^' | isEnabled Ext_superscript opts -> '\\':'^':escapeString opts cs
        '~' | isEnabled Ext_subscript opts -> '\\':'~':escapeString opts cs
        '$' | isEnabled Ext_tex_math_dollars opts -> '\\':'$':escapeString opts cs
@@ -304,22 +311,24 @@ escapeString opts (c:cs) =
        _ -> c : escapeString opts cs
 
 -- | Construct table of contents from list of header blocks.
-tableOfContents :: PandocMonad m => WriterOptions -> [Block] -> m Doc
-tableOfContents opts headers =
-  let contents = BulletList $ map (elementToListItem opts) $ hierarchicalize headers
-  in  evalMD (blockToMarkdown opts contents) def def
+tableOfContents :: PandocMonad m => WriterOptions -> [Block] -> MD m Doc
+tableOfContents opts headers = do
+  contents <- BulletList <$> mapM (elementToListItem opts) (hierarchicalize headers)
+  blockToMarkdown opts contents
 
 -- | Converts an Element to a list item for a table of contents,
-elementToListItem :: WriterOptions -> Element -> [Block]
+elementToListItem :: PandocMonad m => WriterOptions -> Element -> MD m [Block]
 elementToListItem opts (Sec lev _nums (ident,_,_) headerText subsecs)
-  = Plain headerLink :
-    [ BulletList (map (elementToListItem opts) subsecs) |
-      not (null subsecs) && lev < writerTOCDepth opts ]
-   where headerLink = if null ident
+  = do isPlain <- asks envPlain
+       let headerLink = if null ident || isPlain
                          then walk deNote headerText
                          else [Link nullAttr (walk deNote headerText)
                                  ('#':ident, "")]
-elementToListItem _ (Blk _) = []
+       listContents <- if null subsecs || lev >= writerTOCDepth opts
+                          then return []
+                          else mapM (elementToListItem opts) subsecs
+       return [Plain headerLink, BulletList listContents]
+elementToListItem _ (Blk _) = return []
 
 attrsToMarkdown :: Attr -> Doc
 attrsToMarkdown attribs = braces $ hsep [attribId, attribClasses, attribKeys]
@@ -396,11 +405,19 @@ blockToMarkdown' :: PandocMonad m
 blockToMarkdown' _ Null = return empty
 blockToMarkdown' opts (Div attrs ils) = do
   contents <- blockListToMarkdown opts ils
-  return $ if isEnabled Ext_raw_html opts &&
-                isEnabled Ext_markdown_in_html_blocks opts
-              then tagWithAttrs "div" attrs <> blankline <>
-                      contents <> blankline <> "</div>" <> blankline
-              else contents <> blankline
+  return $
+    case () of
+         _ | isEnabled Ext_fenced_divs opts &&
+             attrs /= nullAttr ->
+                nowrap (text ":::" <+> attrsToMarkdown attrs) $$
+                chomp contents $$
+                text ":::" <> blankline
+           | isEnabled Ext_native_divs opts ||
+             (isEnabled Ext_raw_html opts &&
+              isEnabled Ext_markdown_in_html_blocks opts) ->
+                tagWithAttrs "div" attrs <> blankline <>
+                contents <> blankline <> "</div>" <> blankline
+           | otherwise -> contents <> blankline
 blockToMarkdown' opts (Plain inlines) = do
   contents <- inlineListToMarkdown opts inlines
   -- escape if para starts with ordered list marker
@@ -553,16 +570,19 @@ blockToMarkdown' opts t@(Table caption aligns widths headers rows) =  do
                      else blankline $$ (": " <> caption') $$ blankline
   let isLineBreak LineBreak = Any True
       isLineBreak _         = Any False
-  let isSimple = all (==0) widths &&
-                 not ( getAny (query isLineBreak (headers:rows)) )
+  let hasLineBreak = getAny . query isLineBreak
+  let isSimpleCell [Plain ils] = not (hasLineBreak ils)
+      isSimpleCell [Para ils ] = not (hasLineBreak ils)
+      isSimpleCell []          = True
+      isSimpleCell _           = False
+  let hasSimpleCells = all isSimpleCell (concat (headers:rows))
+  let isSimple = hasSimpleCells && all (==0) widths
   let isPlainBlock (Plain _) = True
       isPlainBlock _         = False
   let hasBlocks = not (all isPlainBlock $ concat . concat $ headers:rows)
   let padRow r = case numcols - length r of
                        x | x > 0 -> r ++ replicate x empty
                          | otherwise -> r
-  rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
-  rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts)) rows
   let aligns' = case numcols - length aligns of
                      x | x > 0 -> aligns ++ replicate x AlignDefault
                        | otherwise -> aligns
@@ -572,16 +592,25 @@ blockToMarkdown' opts t@(Table caption aligns widths headers rows) =  do
   (nst,tbl) <-
      case True of
           _ | isSimple &&
-              isEnabled Ext_simple_tables opts -> fmap (nest 2,) $
-                   pandocTable opts False (all null headers) aligns' widths'
-                       rawHeaders rawRows
+              isEnabled Ext_simple_tables opts -> do
+                rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
+                rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts))
+                           rows
+                (nest 2,) <$> pandocTable opts False (all null headers)
+                                aligns' widths' rawHeaders rawRows
             | isSimple &&
-              isEnabled Ext_pipe_tables opts -> fmap (id,) $
-                   pipeTable (all null headers) aligns' rawHeaders rawRows
+              isEnabled Ext_pipe_tables opts -> do
+                rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
+                rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts))
+                           rows
+                (id,) <$> pipeTable (all null headers) aligns' rawHeaders rawRows
             | not hasBlocks &&
-              isEnabled Ext_multiline_tables opts -> fmap (nest 2,) $
-                   pandocTable opts True (all null headers) aligns' widths'
-                       rawHeaders rawRows
+              isEnabled Ext_multiline_tables opts -> do
+                rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
+                rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts))
+                           rows
+                (nest 2,) <$> pandocTable opts True (all null headers)
+                                aligns' widths' rawHeaders rawRows
             | isEnabled Ext_grid_tables opts &&
                writerColumns opts >= 8 * numcols -> (id,) <$>
                 gridTable opts blockListToMarkdown
@@ -589,6 +618,12 @@ blockToMarkdown' opts t@(Table caption aligns widths headers rows) =  do
             | isEnabled Ext_raw_html opts -> fmap (id,) $
                    (text . T.unpack) <$>
                    (writeHtml5String def $ Pandoc nullMeta [t])
+            | hasSimpleCells &&
+              isEnabled Ext_pipe_tables opts -> do
+                rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
+                rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts))
+                           rows
+                (id,) <$> pipeTable (all null headers) aligns' rawHeaders rawRows
             | otherwise -> return $ (id, text "[TABLE]")
   return $ nst $ tbl $$ caption'' $$ blankline
 blockToMarkdown' opts (BulletList items) = do
@@ -672,7 +707,7 @@ pandocTable opts multiline headless aligns widths rawHeaders rawRows = do
   let columns = transpose (rawHeaders : rawRows)
   -- minimal column width without wrapping a single word
   let relWidth w col =
-         max (floor $ fromIntegral (writerColumns opts) * w)
+         max (floor $ fromIntegral (writerColumns opts - 1) * w)
              (if writerWrapText opts == WrapAuto
                  then minNumChars col
                  else numChars col)
@@ -779,6 +814,7 @@ blockListToMarkdown :: PandocMonad m
                     -> MD m Doc
 blockListToMarkdown opts blocks = do
   inlist <- asks envInList
+  isPlain <- asks envPlain
   -- a) insert comment between list and indented code block, or the
   -- code block will be treated as a list continuation paragraph
   -- b) change Plain to Para unless it's followed by a RawBlock
@@ -805,9 +841,11 @@ blockListToMarkdown opts blocks = do
       isListBlock (OrderedList _ _)  = True
       isListBlock (DefinitionList _) = True
       isListBlock _                  = False
-      commentSep                     = if isEnabled Ext_raw_html opts
-                                          then RawBlock "html" "<!-- -->\n"
-                                          else RawBlock "markdown" "&nbsp;\n"
+      commentSep  = if isPlain
+                       then Null
+                       else if isEnabled Ext_raw_html opts
+                            then RawBlock "html" "<!-- -->\n"
+                            else RawBlock "markdown" "&nbsp;\n"
   mapM (blockToMarkdown opts) (fixBlocks blocks) >>= return . cat
 
 getKey :: Doc -> Key
@@ -923,7 +961,7 @@ avoidBadWrapsInList (s:Str cs:[])
 avoidBadWrapsInList (x:xs) = x : avoidBadWrapsInList xs
 
 isOrderedListMarker :: String -> Bool
-isOrderedListMarker xs = (last xs `elem` ['.',')']) &&
+isOrderedListMarker xs = not (null xs) && (last xs `elem` ['.',')']) &&
               isRight (runParser (anyOrderedListMarker >> eof)
                        defaultParserState "" xs)
 
@@ -938,11 +976,12 @@ inlineToMarkdown opts (Span attrs ils) = do
   contents <- inlineListToMarkdown opts ils
   return $ case plain of
                 True -> contents
-                False | isEnabled Ext_bracketed_spans opts ->
-                        "[" <> contents <> "]" <>
-                          if attrs == nullAttr
-                             then "{}"
-                             else linkAttributes opts attrs
+                False | attrs == nullAttr -> contents
+                      | isEnabled Ext_bracketed_spans opts ->
+                        let attrs' = if attrs /= nullAttr
+                                        then attrsToMarkdown attrs
+                                        else empty
+                        in "[" <> contents <> "]" <> attrs'
                       | isEnabled Ext_raw_html opts ||
                         isEnabled Ext_native_spans opts ->
                         tagWithAttrs "span" attrs <> contents <> text "</span>"
@@ -981,7 +1020,7 @@ inlineToMarkdown opts (Superscript lst) =
                          else
                            let rendered = render Nothing contents
                            in  case mapM toSuperscript rendered of
-                                    Just r -> text r
+                                    Just r  -> text r
                                     Nothing -> text $ "^(" ++ rendered ++ ")"
 inlineToMarkdown _ (Subscript []) = return empty
 inlineToMarkdown opts (Subscript lst) =
@@ -994,7 +1033,7 @@ inlineToMarkdown opts (Subscript lst) =
                          else
                            let rendered = render Nothing contents
                            in  case mapM toSubscript rendered of
-                                    Just r -> text r
+                                    Just r  -> text r
                                     Nothing -> text $ "_(" ++ rendered ++ ")"
 inlineToMarkdown opts (SmallCaps lst) = do
   plain <- asks envPlain
@@ -1037,9 +1076,8 @@ inlineToMarkdown opts (Str str) = do
   return $ text str'
 inlineToMarkdown opts (Math InlineMath str) =
   case writerHTMLMathMethod opts of
-       WebTeX url ->
-             inlineToMarkdown opts (Image nullAttr [Str str]
-                 (url ++ urlEncode str, str))
+       WebTeX url -> inlineToMarkdown opts
+                       (Image nullAttr [Str str] (url ++ urlEncode str, str))
        _ | isEnabled Ext_tex_math_dollars opts ->
              return $ "$" <> text str <> "$"
          | isEnabled Ext_tex_math_single_backslash opts ->

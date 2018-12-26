@@ -1,13 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Tests.Readers.LaTeX (tests) where
 
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Text.Pandoc.UTF8 as UTF8
+import Text.Pandoc.Readers.LaTeX (tokenize, untokenize)
 import Test.Tasty
+import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck
 import Tests.Helpers
 import Text.Pandoc
 import Text.Pandoc.Arbitrary ()
 import Text.Pandoc.Builder
-import Data.Text (Text)
-import qualified Data.Text as T
 
 latex :: Text -> Pandoc
 latex = purely $ readLaTeX def{
@@ -22,8 +26,21 @@ simpleTable' :: [Alignment] -> [[Blocks]] -> Blocks
 simpleTable' aligns = table "" (zip aligns (repeat 0.0))
                       (map (const mempty) aligns)
 
+tokUntokRt :: String -> Bool
+tokUntokRt s = untokenize (tokenize "random" t) == t
+  where t = T.pack s
+
 tests :: [TestTree]
-tests = [ testGroup "basic"
+tests = [ testGroup "tokenization"
+          [ testCase "tokenizer round trip on test case" $ do
+                 orig <- T.pack <$> UTF8.readFile "../test/latex-reader.latex"
+                 let new = untokenize $ tokenize "../test/latex-reader.latex"
+                             orig
+                 assertEqual "untokenize . tokenize is identity" orig new
+          , testProperty "untokenize . tokenize is identity" tokUntokRt
+          ]
+
+        , testGroup "basic"
           [ "simple" =:
             "word" =?> para "word"
           , "space" =:
@@ -108,6 +125,33 @@ tests = [ testGroup "basic"
           , biblatexCitations
           ]
 
+        , testGroup "images"
+          [ "Basic image" =:
+            "\\includegraphics{foo.png}" =?>
+            para (image "foo.png" "" (text "image"))
+          , "Basic image with blank options" =:
+            "\\includegraphics[]{foo.png}" =?>
+            para (image "foo.png" "" (text "image"))
+          , "Image with both width and height" =:
+            "\\includegraphics[width=17cm,height=5cm]{foo.png}" =?>
+            para (imageWith ("", [], [("width", "17cm"), ("height", "5cm")]) "foo.png" "" "image")
+          , "Image with width and height and a bunch of other options" =:
+            "\\includegraphics[width=17cm,height=5cm,clip,keepaspectratio]{foo.png}" =?>
+            para (imageWith ("", [], [("width", "17cm"), ("height", "5cm")]) "foo.png" "" "image")
+          , "Image with just width" =:
+            "\\includegraphics[width=17cm]{foo.png}" =?>
+            para (imageWith ("", [], [("width", "17cm")]) "foo.png" "" "image")
+          , "Image with just height" =:
+            "\\includegraphics[height=17cm]{foo.png}" =?>
+            para (imageWith ("", [], [("height", "17cm")]) "foo.png" "" "image")
+          , "Image width relative to textsize" =:
+            "\\includegraphics[width=0.6\\textwidth]{foo.png}" =?>
+            para (imageWith ("", [], [("width", "60%")]) "foo.png" "" "image")
+          , "Image with options with spaces" =:
+            "\\includegraphics[width=12cm, height = 5cm]{foo.png}" =?>
+            para (imageWith ("", [], [("width", "12cm"), ("height", "5cm")]) "foo.png" "" "image")
+          ]
+
         , let hex = ['0'..'9']++['a'..'f'] in
           testGroup "Character Escapes"
           [ "Two-character escapes" =:
@@ -116,6 +160,75 @@ tests = [ testGroup "basic"
           , "One-character escapes" =:
             mconcat ["^^" <> T.pack [i] | i <- hex] =?>
             para (str $ ['p'..'y']++['!'..'&'])
+          ]
+        , testGroup "memoir scene breaks"
+          [ "plainbreak" =:
+            "hello\\plainbreak{2}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "plainbreak*" =:
+            "hello\\plainbreak*{2}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "fancybreak" =:
+            "hello\\fancybreak{b r e a k}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "fancybreak*" =:
+            "hello\\fancybreak*{b r e a k}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "plainfancybreak" =:
+            "hello\\plainfancybreak{4}{2}{b r e a k}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "plainfancybreak*" =:
+            "hello\\plainfancybreak*{4}{2}{b r e a k}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "pfbreak" =:
+            "hello\\pfbreak{}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          , "pfbreak*" =:
+            "hello\\pfbreak*{}goodbye" =?>
+            para (str "hello") <> horizontalRule <> para (str "goodbye")
+          ]
+        , testGroup "biblatex roman numerals"
+          [ "upper" =:
+            "number \\RN{12}" =?>
+            para (str "number" <> space <> str "XII")
+          , "lower" =:
+            "number \\Rn{29}" =?>
+            para (str "number" <> space <> str "xxix")
+          , "leading zero" =:
+            "\\Rn{014}" =?>
+            para (str "xiv")
+          , "surrounding spaces" =:
+            "number \\Rn{ 41 }" =?>
+            para (str "number" <> space <> str "xli")
+          , "zero" =:
+            "\\RN{0}" =?>
+            para (str "")
+          , "space then unbraced argument" =:
+            "\\RN 7 ok" =?>
+            para (str "VII" <> space <> str "ok")
+          , "space before braced argument" =:
+            "\\Rn {13}ok" =?>
+            para (str "xiiiok")
+          ]
+        , testGroup "polyglossia language spans"
+          [ "french" =:
+            "hello \\textfrench{bonjour}" =?>
+            para (str "hello" <> space <> spanWith ("", [], [("lang", "fr")]) (str "bonjour"))
+          , "nested" =:
+            "\\textfrench{quelle c'est \\textlatin{primus}?}" =?>
+            para (spanWith ("", [], [("lang", "fr")]) $
+                    str "quelle" <> space <> str "c\8217est" <> space <>
+                    spanWith ("", [], [("lang", "la")]) (str "primus") <> str "?")
+          , "with formatting" =:
+            "\\textgerman{wie \\emph{spaet} ist es?}" =?>
+            para (spanWith ("", [], [("lang", "de")]) $
+                    str "wie" <> space <> emph (str "spaet") <> space <> str "ist" <> space <> str "es?")
+          , "language options" =:
+            "\\textgerman[variant=swiss]{hoechdeutsche}" =?>
+            para (spanWith ("", [], [("lang", "de-CH")]) $ str "hoechdeutsche")
+          , "unknown option fallback" =:
+            "\\textgerman[variant=moon]{ueberhoechdeutsche}" =?>
+            para (spanWith ("", [], [("lang", "de")]) $ str "ueberhoechdeutsche")
           ]
         ]
 

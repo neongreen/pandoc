@@ -3,8 +3,7 @@ Pandoc (Meta {unMeta = fromList [("author",MetaList [MetaInlines [Str "Author",S
 ,Header 2 ("blank-line-before-url-in-link-reference",[],[]) [Str "Blank",Space,Str "line",Space,Str "before",Space,Str "URL",Space,Str "in",Space,Str "link",Space,Str "reference"]
 ,Para [Link ("",[],[]) [Str "foo"] ("/url",""),Space,Str "and",Space,Link ("",[],[]) [Str "bar"] ("/url","title")]
 ,Header 2 ("raw-context-environments",[],[]) [Str "Raw",Space,Str "ConTeXt",Space,Str "environments"]
-,RawBlock (Format "latex") "\\placeformula "
-,RawBlock (Format "context") "\\startformula\n   L_{1} = L_{2}\n   \\stopformula"
+,RawBlock (Format "context") "\\placeformula \\startformula\n   L_{1} = L_{2}\n   \\stopformula"
 ,RawBlock (Format "context") "\\start[a2]\n\\start[a2]\n\\stop[a2]\n\\stop[a2]"
 ,Header 2 ("raw-latex-environments",[],[]) [Str "Raw",Space,Str "LaTeX",Space,Str "environments"]
 ,RawBlock (Format "latex") "\\begin{center}\n\\begin{tikzpicture}[baseline={([yshift=+-.5ex]current bounding box.center)}, level distance=24pt]\n\\Tree [.{S} [.NP John\\index{i} ] [.VP [.V likes ] [.NP himself\\index{i,*j} ]]]\n\\end{tikzpicture}\n\\end{center}"
@@ -29,13 +28,13 @@ Pandoc (Meta {unMeta = fromList [("author",MetaList [MetaInlines [Str "Author",S
  ,[Plain [Str "three"]]]
 ,Header 2 ("indented-code-at-beginning-of-list",[],[]) [Str "Indented",Space,Str "code",Space,Str "at",Space,Str "beginning",Space,Str "of",Space,Str "list"]
 ,BulletList
- [[CodeBlock ("",[],[]) "code\ncode"]]
-,OrderedList (1,Decimal,Period)
- [[CodeBlock ("",[],[]) "code\ncode"]
- ,[CodeBlock ("",[],[]) "code\ncode"]]
-,BulletList
- [[CodeBlock ("",[],[]) "code\ncode"]
- ,[Plain [Str "no",Space,Str "code"]]]
+ [[CodeBlock ("",[],[]) "code\ncode"
+  ,OrderedList (1,Decimal,Period)
+   [[CodeBlock ("",[],[]) "code\ncode"]
+   ,[CodeBlock ("",[],[]) "code\ncode"]]
+  ,BulletList
+   [[CodeBlock ("",[],[]) "code\ncode"]
+   ,[Plain [Str "no",Space,Str "code"]]]]]
 ,Header 2 ("backslash-newline",[],[]) [Str "Backslash",Space,Str "newline"]
 ,Para [Str "hi",LineBreak,Str "there"]
 ,Header 2 ("code-spans",[],[]) [Str "Code",Space,Str "spans"]

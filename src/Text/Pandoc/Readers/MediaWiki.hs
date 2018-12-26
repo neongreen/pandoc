@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 -- RelaxedPolyRec needed for inlinesBetween on GHC < 7
 {-
-  Copyright (C) 2012-2017 John MacFarlane <jgm@berkeley.edu>
+  Copyright (C) 2012-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.MediaWiki
-   Copyright   : Copyright (C) 2012-2017 John MacFarlane
+   Copyright   : Copyright (C) 2012-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -41,25 +41,25 @@ module Text.Pandoc.Readers.MediaWiki ( readMediaWiki ) where
 import Control.Monad
 import Control.Monad.Except (throwError)
 import Data.Char (isDigit, isSpace)
-import Data.Text (Text, unpack)
 import qualified Data.Foldable as F
 import Data.List (intercalate, intersperse, isPrefixOf)
 import qualified Data.Map as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Monoid ((<>))
 import Data.Sequence (ViewL (..), viewl, (<|))
 import qualified Data.Set as Set
+import Data.Text (Text, unpack)
 import Text.HTML.TagSoup
 import Text.Pandoc.Builder (Blocks, Inlines, trimInlines)
 import qualified Text.Pandoc.Builder as B
-import Text.Pandoc.Class (PandocMonad(..))
+import Text.Pandoc.Class (PandocMonad (..))
 import Text.Pandoc.Definition
 import Text.Pandoc.Logging
 import Text.Pandoc.Options
 import Text.Pandoc.Parsing hiding (nested)
 import Text.Pandoc.Readers.HTML (htmlTag, isBlockTag, isCommentTag)
-import Text.Pandoc.Shared (safeRead, stringify, stripTrailingNewlines, trim,
-         crFilter)
+import Text.Pandoc.Shared (crFilter, safeRead, stringify, stripTrailingNewlines,
+                           trim)
 import Text.Pandoc.Walk (walk)
 import Text.Pandoc.XML (fromEntities)
 
@@ -239,7 +239,7 @@ table = do
                          Nothing -> 1.0
   caption <- option mempty tableCaption
   optional rowsep
-  hasheader <- option False $ True <$ (lookAhead (skipSpaces *> char '!'))
+  hasheader <- option False $ True <$ lookAhead (skipSpaces *> char '!')
   (cellspecs',hdr) <- unzip <$> tableRow
   let widths = map ((tableWidth *) . snd) cellspecs'
   let restwidth = tableWidth - sum widths
@@ -358,7 +358,7 @@ syntaxhighlight tag attrs = try $ do
   let mblang = lookup "lang" attrs
   let mbstart = lookup "start" attrs
   let mbline = lookup "line" attrs
-  let classes = maybe [] (:[]) mblang ++ maybe [] (const ["numberLines"]) mbline
+  let classes = maybeToList mblang ++ maybe [] (const ["numberLines"]) mbline
   let kvs = maybe [] (\x -> [("startFrom",x)]) mbstart
   contents <- charsInTags tag
   return $ B.codeBlockWith ("",classes,kvs) $ trimCode contents
@@ -373,7 +373,7 @@ preformatted :: PandocMonad m => MWParser m Blocks
 preformatted = try $ do
   guardColumnOne
   char ' '
-  let endline' = B.linebreak <$ (try $ newline <* char ' ')
+  let endline' = B.linebreak <$ try (newline <* char ' ')
   let whitespace' = B.str <$> many1 ('\160' <$ spaceChar)
   let spToNbsp ' ' = '\160'
       spToNbsp x   = x
@@ -382,7 +382,7 @@ preformatted = try $ do
                   (htmlTag (~== TagOpen "nowiki" []) *>
                    manyTill anyChar (htmlTag (~== TagClose "nowiki")))
   let inline' = whitespace' <|> endline' <|> nowiki'
-                  <|> (try $ notFollowedBy newline *> inline)
+                  <|> try (notFollowedBy newline *> inline)
   contents <- mconcat <$> many1 inline'
   let spacesStr (Str xs) = all isSpace xs
       spacesStr _        = False
@@ -397,7 +397,7 @@ encode = B.fromList . normalizeCode . B.toList . walk strToCode
         strToCode  x      = x
         normalizeCode []  = []
         normalizeCode (Code a1 x : Code a2 y : zs) | a1 == a2 =
-          normalizeCode $ (Code a1 (x ++ y)) : zs
+          normalizeCode $ Code a1 (x ++ y) : zs
         normalizeCode (x:xs) = x : normalizeCode xs
 
 header :: PandocMonad m => MWParser m Blocks
@@ -510,8 +510,8 @@ listItem' c = try $ do
 firstParaToPlain :: Blocks -> Blocks
 firstParaToPlain contents =
   case viewl (B.unMany contents) of
-       (Para xs) :< ys -> B.Many $ (Plain xs) <| ys
-       _               -> contents
+       Para xs :< ys -> B.Many $ Plain xs <| ys
+       _             -> contents
 
 --
 -- inline parsers
@@ -612,13 +612,13 @@ image = try $ do
   choice imageIdentifiers
   fname <- addUnderscores <$> many1 (noneOf "|]")
   _ <- many imageOption
-  dims <- try (char '|' *> (sepBy (many digit) (char 'x')) <* string "px")
+  dims <- try (char '|' *> sepBy (many digit) (char 'x') <* string "px")
           <|> return []
   _ <- many imageOption
   let kvs = case dims of
-              w:[]     -> [("width", w)]
-              w:(h:[]) -> [("width", w), ("height", h)]
-              _        -> []
+              [w]    -> [("width", w)]
+              [w, h] -> [("width", w), ("height", h)]
+              _      -> []
   let attr = ("", [], kvs)
   caption <-   (B.str fname <$ sym "]]")
            <|> try (char '|' *> (mconcat <$> manyTill inline (sym "]]")))
@@ -651,7 +651,7 @@ internalLink = try $ do
              (  (mconcat <$> many1 (notFollowedBy (char ']') *> inline))
              -- the "pipe trick"
              -- [[Help:Contents|] -> "Contents"
-             <|> (return $ B.text $ drop 1 $ dropWhile (/=':') pagename) )
+             <|> return (B.text $ drop 1 $ dropWhile (/=':') pagename) )
   sym "]]"
   linktrail <- B.text <$> many letter
   let link = B.link (addUnderscores pagename) "wikilink" (label <> linktrail)

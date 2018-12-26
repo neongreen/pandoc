@@ -6,10 +6,6 @@ Pandoc Test Suite
 :Author: Anonymous
 :Date:   July 17, 2006
 
-.. role:: math(raw)
-   :format: html latex
-..
-
 .. role:: raw-latex(raw)
    :format: latex
 ..
@@ -772,7 +768,7 @@ Just a `URL </url/>`__.
 
 `URL and title </url/>`__
 
-`with\_underscore </url/with_underscore>`__
+`with_underscore </url/with_underscore>`__
 
 `Email link <mailto:nobody@nowhere.net>`__
 

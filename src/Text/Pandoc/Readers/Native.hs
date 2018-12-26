@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2011-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2011-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.Native
-   Copyright   : Copyright (C) 2011-2017 John MacFarlane
+   Copyright   : Copyright (C) 2011-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -35,9 +35,9 @@ import Text.Pandoc.Options (ReaderOptions)
 import Text.Pandoc.Shared (safeRead)
 
 import Control.Monad.Except (throwError)
+import Data.Text (Text, unpack)
 import Text.Pandoc.Class
 import Text.Pandoc.Error
-import Data.Text (Text, unpack)
 
 -- | Read native formatted text and return a Pandoc document.
 -- The input may be a full pandoc document, a block list, a block,
@@ -69,4 +69,3 @@ readInlines s = maybe ((:[]) <$> readInline s) Right (safeRead (unpack s))
 
 readInline :: Text -> Either PandocError Inline
 readInline s = maybe (Left . PandocParseError $ "Could not read: " ++ unpack s) Right (safeRead (unpack s))
-

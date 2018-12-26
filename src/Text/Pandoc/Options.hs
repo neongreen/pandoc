@@ -1,7 +1,8 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE TemplateHaskell    #-}
 {-
-Copyright (C) 2012-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2012-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Options
-   Copyright   : Copyright (C) 2012-2017 John MacFarlane
+   Copyright   : Copyright (C) 2012-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -45,8 +46,8 @@ module Text.Pandoc.Options ( module Text.Pandoc.Extensions
                            , def
                            , isEnabled
                            ) where
-import Data.Aeson (ToJSON(..), FromJSON(..),
-                   genericToEncoding, defaultOptions)
+import Data.Aeson (defaultOptions)
+import Data.Aeson.TH (deriveJSON)
 import Data.Data (Data)
 import Data.Default
 import qualified Data.Set as Set
@@ -55,6 +56,9 @@ import GHC.Generics (Generic)
 import Skylighting (SyntaxMap, defaultSyntaxMap)
 import Text.Pandoc.Extensions
 import Text.Pandoc.Highlighting (Style, pygments)
+
+class HasSyntaxExtensions a where
+  getExtensions :: a -> Extensions
 
 data ReaderOptions = ReaderOptions{
          readerExtensions            :: Extensions  -- ^ Syntax extensions
@@ -65,8 +69,12 @@ data ReaderOptions = ReaderOptions{
                                        -- indented code blocks
        , readerAbbreviations         :: Set.Set String -- ^ Strings to treat as abbreviations
        , readerDefaultImageExtension :: String -- ^ Default extension for images
-       , readerTrackChanges          :: TrackChanges
+       , readerTrackChanges          :: TrackChanges -- ^ Track changes setting for docx
+       , readerStripComments         :: Bool -- ^ Strip HTML comments instead of parsing as raw HTML
 } deriving (Show, Read, Data, Typeable, Generic)
+
+instance HasSyntaxExtensions ReaderOptions where
+  getExtensions opts = readerExtensions opts
 
 instance Default ReaderOptions
   where def = ReaderOptions{
@@ -78,6 +86,7 @@ instance Default ReaderOptions
                , readerAbbreviations         = defaultAbbrevs
                , readerDefaultImageExtension = ""
                , readerTrackChanges          = AcceptChanges
+               , readerStripComments         = False
                }
 
 defaultAbbrevs :: Set.Set String
@@ -101,31 +110,19 @@ data HTMLMathMethod = PlainMath
                     | WebTeX String               -- url of TeX->image script.
                     | MathML
                     | MathJax String              -- url of MathJax.js
-                    | KaTeX String String -- url of stylesheet and katex.js
+                    | KaTeX String                -- url of KaTeX files
                     deriving (Show, Read, Eq, Data, Typeable, Generic)
-
-instance ToJSON HTMLMathMethod where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON HTMLMathMethod
 
 data CiteMethod = Citeproc                        -- use citeproc to render them
                   | Natbib                        -- output natbib cite commands
                   | Biblatex                      -- output biblatex cite commands
                 deriving (Show, Read, Eq, Data, Typeable, Generic)
 
-instance ToJSON CiteMethod where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON CiteMethod
-
 -- | Methods for obfuscating email addresses in HTML.
 data ObfuscationMethod = NoObfuscation
                        | ReferenceObfuscation
                        | JavascriptObfuscation
                        deriving (Show, Read, Eq, Data, Typeable, Generic)
-
-instance ToJSON ObfuscationMethod where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON ObfuscationMethod
 
 -- | Varieties of HTML slide shows.
 data HTMLSlideVariant = S5Slides
@@ -136,29 +133,17 @@ data HTMLSlideVariant = S5Slides
                       | NoSlides
                       deriving (Show, Read, Eq, Data, Typeable, Generic)
 
-instance ToJSON HTMLSlideVariant where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON HTMLSlideVariant
-
 -- | Options for accepting or rejecting MS Word track-changes.
 data TrackChanges = AcceptChanges
                   | RejectChanges
                   | AllChanges
                   deriving (Show, Read, Eq, Data, Typeable, Generic)
 
-instance ToJSON TrackChanges where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON TrackChanges
-
 -- | Options for wrapping text in the output.
 data WrapOption = WrapAuto        -- ^ Automatically wrap to width
                 | WrapNone        -- ^ No non-semantic newlines
                 | WrapPreserve    -- ^ Preserve wrapping of input source
                 deriving (Show, Read, Eq, Data, Typeable, Generic)
-
-instance ToJSON WrapOption where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON WrapOption
 
 -- | Options defining the type of top-level headers.
 data TopLevelDivision = TopLevelPart      -- ^ Top-level headers become parts
@@ -168,19 +153,11 @@ data TopLevelDivision = TopLevelPart      -- ^ Top-level headers become parts
                                           --   heuristics
                       deriving (Show, Read, Eq, Data, Typeable, Generic)
 
-instance ToJSON TopLevelDivision where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON TopLevelDivision
-
 -- | Locations for footnotes and references in markdown output
 data ReferenceLocation = EndOfBlock    -- ^ End of block
                        | EndOfSection  -- ^ prior to next section header (or end of document)
                        | EndOfDocument -- ^ at end of document
                        deriving (Show, Read, Eq, Data, Typeable, Generic)
-
-instance ToJSON ReferenceLocation where
-  toEncoding = genericToEncoding defaultOptions
-instance FromJSON ReferenceLocation
 
 -- | Options for writers
 data WriterOptions = WriterOptions
@@ -201,8 +178,6 @@ data WriterOptions = WriterOptions
   , writerEmailObfuscation  :: ObfuscationMethod -- ^ How to obfuscate emails
   , writerIdentifierPrefix  :: String -- ^ Prefix for section & note ids in HTML
                                      -- and for footnote marks in markdown
-  , writerSourceURL         :: Maybe String  -- ^ Absolute URL + directory of 1st source file
-  , writerUserDataDir       :: Maybe FilePath -- ^ Path of user data directory
   , writerCiteMethod        :: CiteMethod -- ^ How to print cites
   , writerHtmlQTags         :: Bool       -- ^ Use @<q>@ tags for quotes in HTML
   , writerSlideLevel        :: Maybe Int  -- ^ Force header level of slides
@@ -217,7 +192,6 @@ data WriterOptions = WriterOptions
   , writerEpubChapterLevel  :: Int            -- ^ Header level for chapters (separate files)
   , writerTOCDepth          :: Int            -- ^ Number of levels to include in TOC
   , writerReferenceDoc      :: Maybe FilePath -- ^ Path to reference document if specified
-  , writerLaTeXArgs         :: [String]       -- ^ Flags to pass to latex-engine
   , writerReferenceLocation :: ReferenceLocation    -- ^ Location of footnotes and references for writing markdown
   , writerSyntaxMap         :: SyntaxMap
   } deriving (Show, Data, Typeable, Generic)
@@ -239,8 +213,6 @@ instance Default WriterOptions where
                       , writerColumns          = 72
                       , writerEmailObfuscation = NoObfuscation
                       , writerIdentifierPrefix = ""
-                      , writerSourceURL        = Nothing
-                      , writerUserDataDir      = Nothing
                       , writerCiteMethod       = Citeproc
                       , writerHtmlQTags        = False
                       , writerSlideLevel       = Nothing
@@ -254,11 +226,23 @@ instance Default WriterOptions where
                       , writerEpubChapterLevel = 1
                       , writerTOCDepth         = 3
                       , writerReferenceDoc     = Nothing
-                      , writerLaTeXArgs        = []
                       , writerReferenceLocation = EndOfDocument
                       , writerSyntaxMap        = defaultSyntaxMap
                       }
 
+instance HasSyntaxExtensions WriterOptions where
+  getExtensions opts = writerExtensions opts
+
 -- | Returns True if the given extension is enabled.
-isEnabled :: Extension -> WriterOptions -> Bool
-isEnabled ext opts = ext `extensionEnabled` (writerExtensions opts)
+isEnabled :: HasSyntaxExtensions a => Extension -> a -> Bool
+isEnabled ext opts = ext `extensionEnabled` getExtensions opts
+
+$(deriveJSON defaultOptions ''ReaderOptions)
+$(deriveJSON defaultOptions ''HTMLMathMethod)
+$(deriveJSON defaultOptions ''CiteMethod)
+$(deriveJSON defaultOptions ''ObfuscationMethod)
+$(deriveJSON defaultOptions ''HTMLSlideVariant)
+$(deriveJSON defaultOptions ''TrackChanges)
+$(deriveJSON defaultOptions ''WrapOption)
+$(deriveJSON defaultOptions ''TopLevelDivision)
+$(deriveJSON defaultOptions ''ReferenceLocation)
